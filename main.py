@@ -1128,9 +1128,11 @@ async def admin_get_settings(request: Request):
             "api_key": config.basic.api_key,
             "base_url": config.basic.base_url,
             "proxy": config.basic.proxy,
+            "mail_provider": config.basic.mail_provider,
             "duckmail_base_url": config.basic.duckmail_base_url,
             "duckmail_api_key": config.basic.duckmail_api_key,
             "duckmail_verify_ssl": config.basic.duckmail_verify_ssl,
+            "chatgpt_mail_base_url": config.basic.chatgpt_mail_base_url,
             "browser_engine": config.basic.browser_engine,
             "browser_headless": config.basic.browser_headless,
             "refresh_window_hours": config.basic.refresh_window_hours,
@@ -1172,9 +1174,11 @@ async def admin_update_settings(request: Request, new_settings: dict = Body(...)
 
     try:
         basic = dict(new_settings.get("basic") or {})
+        basic.setdefault("mail_provider", config.basic.mail_provider)
         basic.setdefault("duckmail_base_url", config.basic.duckmail_base_url)
         basic.setdefault("duckmail_api_key", config.basic.duckmail_api_key)
         basic.setdefault("duckmail_verify_ssl", config.basic.duckmail_verify_ssl)
+        basic.setdefault("chatgpt_mail_base_url", config.basic.chatgpt_mail_base_url)
         basic.setdefault("browser_engine", config.basic.browser_engine)
         basic.setdefault("browser_headless", config.basic.browser_headless)
         basic.setdefault("refresh_window_hours", config.basic.refresh_window_hours)
