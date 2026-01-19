@@ -46,9 +46,11 @@ class BasicConfig(BaseModel):
     api_key: str = Field(default="", description="API访问密钥（留空则公开访问）")
     base_url: str = Field(default="", description="服务器URL（留空则自动检测）")
     proxy: str = Field(default="", description="代理地址")
+    mail_provider: str = Field(default="duckmail", description="邮箱提供商：duckmail 或 chatgpt")
     duckmail_base_url: str = Field(default="https://api.duckmail.sbs", description="DuckMail API地址")
     duckmail_api_key: str = Field(default="", description="DuckMail API key")
     duckmail_verify_ssl: bool = Field(default=True, description="DuckMail SSL校验")
+    chatgpt_mail_base_url: str = Field(default="https://mail.chatgpt.org.uk", description="ChatGPT Mail API地址")
     browser_engine: str = Field(default="dp", description="浏览器引擎：uc 或 dp")
     browser_headless: bool = Field(default=False, description="自动化浏览器无头模式")
     refresh_window_hours: int = Field(default=1, ge=0, le=24, description="过期刷新窗口（小时）")
@@ -151,9 +153,11 @@ class ConfigManager:
             api_key=basic_data.get("api_key") or "",
             base_url=basic_data.get("base_url") or "",
             proxy=basic_data.get("proxy") or "",
+            mail_provider=basic_data.get("mail_provider") or "duckmail",
             duckmail_base_url=basic_data.get("duckmail_base_url") or "https://api.duckmail.sbs",
             duckmail_api_key=str(duckmail_api_key_raw or "").strip(),
             duckmail_verify_ssl=_parse_bool(basic_data.get("duckmail_verify_ssl"), True),
+            chatgpt_mail_base_url=basic_data.get("chatgpt_mail_base_url") or "https://mail.chatgpt.org.uk",
             browser_engine=basic_data.get("browser_engine") or "dp",
             browser_headless=_parse_bool(basic_data.get("browser_headless"), False),
             refresh_window_hours=int(refresh_window_raw),

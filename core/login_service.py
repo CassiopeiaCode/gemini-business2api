@@ -11,6 +11,7 @@ from core.account import load_accounts_from_source
 from core.base_task_service import BaseTask, BaseTaskService, TaskStatus
 from core.config import config
 from core.duckmail_client import DuckMailClient
+from core.chatgpt_mail_client import ChatGPTMailClient
 from core.gemini_automation import GeminiAutomation
 from core.gemini_automation_uc import GeminiAutomationUC
 from core.microsoft_mail_client import MicrosoftMailClient
@@ -137,6 +138,15 @@ class LoginService(BaseTaskService[LoginTask]):
                 log_callback=log_cb,
             )
             client.set_credentials(mail_address)
+        elif mail_provider == "chatgpt_mail" or mail_provider == "chatgpt":
+            # ChatGPT Mail: 不需要密码，只需要邮箱地址
+            client = ChatGPTMailClient(
+                base_url=config.basic.chatgpt_mail_base_url,
+                proxy=config.basic.proxy,
+                verify_ssl=True,
+                log_callback=log_cb,
+            )
+            client.set_credentials(account_id)
         elif mail_provider == "duckmail":
             if not mail_password:
                 return {"success": False, "email": account_id, "error": "mail password missing"}
@@ -180,12 +190,20 @@ class LoginService(BaseTaskService[LoginTask]):
         # 更新账户配置
         config_data = result["config"]
         config_data["mail_provider"] = mail_provider
-        config_data["mail_password"] = mail_password
+        
+        # 根据邮件提供商保存不同的凭证
         if mail_provider == "microsoft":
             config_data["mail_address"] = account.get("mail_address") or account_id
             config_data["mail_client_id"] = mail_client_id
             config_data["mail_refresh_token"] = mail_refresh_token
             config_data["mail_tenant"] = mail_tenant
+        elif mail_provider in ("chatgpt_mail", "chatgpt"):
+            # ChatGPT Mail 不需要密码
+            config_data["mail_password"] = ""
+        else:
+            # DuckMail 需要密码
+            config_data["mail_password"] = mail_password
+            
         config_data["disabled"] = account.get("disabled", False)
 
         for acc in accounts:
@@ -217,7 +235,11 @@ class LoginService(BaseTaskService[LoginTask]):
             if mail_provider == "microsoft":
                 if not account.get("mail_client_id") or not account.get("mail_refresh_token"):
                     continue
+            elif mail_provider in ("chatgpt_mail", "chatgpt"):
+                # ChatGPT Mail 不需要密码验证，可以直接刷新
+                pass
             else:
+                # DuckMail 需要密码
                 if not mail_password:
                     continue
             expires_at = account.get("expires_at")
