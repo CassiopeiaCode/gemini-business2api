@@ -10,6 +10,8 @@ from urllib.parse import quote
 
 from DrissionPage import ChromiumPage, ChromiumOptions
 
+from .proxy_helper import parse_proxy, get_proxy_extension_path
+
 
 # 常量
 AUTH_HOME_URL = "https://auth.business.gemini.google/"
@@ -66,8 +68,22 @@ class GeminiAutomation:
         options.set_argument("--lang=zh-CN")
         options.set_pref("intl.accept_languages", "zh-CN,zh")
 
+        # 代理设置
         if self.proxy:
-            options.set_argument(f"--proxy-server={self.proxy}")
+            proxy_server, username, password = parse_proxy(self.proxy)
+            
+            if username and password:
+                # 带认证的代理：使用扩展程序
+                try:
+                    proxy_extension_dir = get_proxy_extension_path(proxy_server, username, password)
+                    options.set_argument(f"--load-extension={proxy_extension_dir}")
+                    self._log("info", f"using proxy with auth: {proxy_server}")
+                except Exception as e:
+                    self._log("warning", f"failed to create proxy extension: {e}, trying direct proxy")
+                    options.set_argument(f"--proxy-server={proxy_server}")
+            else:
+                # 无认证的代理：直接使用
+                options.set_argument(f"--proxy-server={proxy_server}")
 
         if self.headless:
             # 使用新版无头模式，更接近真实浏览器
@@ -508,10 +524,15 @@ class GeminiAutomation:
             return
         try:
             import shutil
+            import os
             if os.path.exists(user_data_dir):
                 shutil.rmtree(user_data_dir, ignore_errors=True)
         except Exception:
             pass
+        
+        # 清理代理扩展临时目录
+        # 注意：这里暂时不清理，因为扩展目录路径没有保存为实例变量
+        # 如果需要清理，可以在 _create_page 中保存扩展目录路径
 
     @staticmethod
     def _get_ua() -> str:

@@ -15,6 +15,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
+from .proxy_helper import parse_proxy, get_proxy_extension_path
+
 
 # 常量
 AUTH_HOME_URL = "https://auth.business.gemini.google/"
@@ -74,8 +76,22 @@ class GeminiAutomationUC:
         })
 
         # 代理设置
+        proxy_extension_dir = None
         if self.proxy:
-            options.add_argument(f"--proxy-server={self.proxy}")
+            proxy_server, username, password = parse_proxy(self.proxy)
+            
+            if username and password:
+                # 带认证的代理：使用扩展程序
+                try:
+                    proxy_extension_dir = get_proxy_extension_path(proxy_server, username, password)
+                    options.add_argument(f"--load-extension={proxy_extension_dir}")
+                    self._log("info", f"using proxy with auth: {proxy_server}")
+                except Exception as e:
+                    self._log("warning", f"failed to create proxy extension: {e}, trying direct proxy")
+                    options.add_argument(f"--proxy-server={proxy_server}")
+            else:
+                # 无认证的代理：直接使用
+                options.add_argument(f"--proxy-server={proxy_server}")
 
         # 无头模式
         if self.headless:
@@ -460,6 +476,10 @@ class GeminiAutomationUC:
                     shutil.rmtree(self.user_data_dir, ignore_errors=True)
             except Exception:
                 pass
+        
+        # 清理代理扩展临时目录
+        # 注意：这里暂时不清理，因为扩展目录路径没有保存为实例变量
+        # 如果需要清理，可以在 _create_driver 中保存扩展目录路径
 
     def _log(self, level: str, message: str) -> None:
         """记录日志"""
