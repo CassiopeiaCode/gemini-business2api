@@ -44,6 +44,7 @@ class LoginService(BaseTaskService[LoginTask]):
         session_cache_ttl_seconds: int,
         global_stats_provider: Callable[[], dict],
         set_multi_account_mgr: Optional[Callable[[Any], None]] = None,
+        register_service: Optional[Any] = None,
     ) -> None:
         super().__init__(
             multi_account_mgr,
@@ -57,6 +58,7 @@ class LoginService(BaseTaskService[LoginTask]):
             log_prefix="REFRESH",
         )
         self._is_polling = False
+        self.register_service = register_service
 
     async def start_login(self, account_ids: List[str]) -> LoginTask:
         """启动登录任务"""
@@ -162,13 +164,16 @@ class LoginService(BaseTaskService[LoginTask]):
         else:
             return {"success": False, "email": account_id, "error": f"unsupported mail provider: {mail_provider}"}
 
+        # 浏览器代理：优先使用 browser_proxy；为空则回退到 proxy（兼容旧配置）
+        browser_proxy = (config.basic.browser_proxy or "").strip() or (config.basic.proxy or "").strip()
+
         # 根据配置选择浏览器引擎
         browser_engine = (config.basic.browser_engine or "dp").lower()
         if browser_engine == "dp":
             # DrissionPage 引擎：支持有头和无头模式
             automation = GeminiAutomation(
                 user_agent=self.user_agent,
-                proxy=config.basic.proxy,
+                proxy=browser_proxy,
                 headless=config.basic.browser_headless,
                 log_callback=log_cb,
             )
@@ -176,7 +181,7 @@ class LoginService(BaseTaskService[LoginTask]):
             # undetected-chromedriver 引擎：支持有头和无头
             automation = GeminiAutomationUC(
                 user_agent=self.user_agent,
-                proxy=config.basic.proxy,
+                proxy=browser_proxy,
                 headless=config.basic.browser_headless,
                 log_callback=log_cb,
             )
@@ -262,6 +267,39 @@ class LoginService(BaseTaskService[LoginTask]):
         if os.environ.get("ACCOUNTS_CONFIG"):
             logger.info("[LOGIN] ACCOUNTS_CONFIG set, skipping refresh")
             return
+
+        # 自愈逻辑：如果“非可用状态”的账号占比过高(>60%)，且没有注册任务在跑，则触发注册 10 个新账号
+        # 非可用：AccountManager.should_retry() == False（包含 429 冷却中 & 错误禁用）
+        try:
+            candidates = [
+                acc for acc in self.multi_account_mgr.accounts.values()
+                if (not acc.config.disabled) and (not acc.config.is_expired())
+            ]
+            total = len(candidates)
+            if total > 0:
+                unavailable = 0
+                for acc in candidates:
+                    if not acc.should_retry():
+                        unavailable += 1
+
+                ratio = unavailable / total
+                if ratio > 0.60 and self.register_service is not None:
+                    current_task = self.register_service.get_current_task()
+                    is_running = bool(current_task and current_task.status == TaskStatus.RUNNING)
+                    if not is_running:
+                        logger.warning(
+                            "[LOGIN] unavailable accounts ratio too high: %s/%s (%.0f%%); starting register task (count=10)",
+                            unavailable,
+                            total,
+                            ratio * 100.0,
+                        )
+                        try:
+                            await self.register_service.start_register(count=10)
+                        except Exception as exc:
+                            logger.error("[LOGIN] failed to start register task: %s", exc)
+        except Exception as exc:
+            logger.error("[LOGIN] unavailable ratio check failed: %s", exc)
+
         expiring_accounts = self._get_expiring_accounts()
         if not expiring_accounts:
             logger.debug("[LOGIN] no accounts need refresh")
@@ -273,16 +311,26 @@ class LoginService(BaseTaskService[LoginTask]):
             logger.warning("[LOGIN] %s", exc)
 
     async def start_polling(self) -> None:
+        polling_seconds = int(getattr(config.retry, "login_refresh_polling_seconds", 1800) or 0)
+        if polling_seconds <= 0:
+            logger.info("[LOGIN] refresh polling disabled (login_refresh_polling_seconds=0)")
+            return
+
         if self._is_polling:
             logger.warning("[LOGIN] polling already running")
             return
 
         self._is_polling = True
-        logger.info("[LOGIN] refresh polling started (interval: 30 minutes)")
+        logger.info("[LOGIN] refresh polling started (interval: %s seconds)", polling_seconds)
         try:
             while self._is_polling:
                 await self.check_and_refresh()
-                await asyncio.sleep(1800)
+                # 支持热更新：每轮读取一次最新配置
+                polling_seconds = int(getattr(config.retry, "login_refresh_polling_seconds", polling_seconds) or 0)
+                if polling_seconds <= 0:
+                    logger.info("[LOGIN] refresh polling disabled during runtime (login_refresh_polling_seconds=0)")
+                    break
+                await asyncio.sleep(polling_seconds)
         except asyncio.CancelledError:
             logger.info("[LOGIN] polling stopped")
         except Exception as exc:

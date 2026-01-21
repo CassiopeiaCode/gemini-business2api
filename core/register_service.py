@@ -135,13 +135,16 @@ class RegisterService(BaseTaskService[RegisterTask]):
                 return {"success": False, "error": "duckmail register failed"}
             mail_provider_name = "duckmail"
 
+        # 浏览器代理：优先使用 browser_proxy；为空则回退到 proxy（兼容旧配置）
+        browser_proxy = (config.basic.browser_proxy or "").strip() or (config.basic.proxy or "").strip()
+
         # 根据配置选择浏览器引擎
         browser_engine = (config.basic.browser_engine or "dp").lower()
         if browser_engine == "dp":
             # DrissionPage 引擎：支持有头和无头模式
             automation = GeminiAutomation(
                 user_agent=self.user_agent,
-                proxy=config.basic.proxy,
+                proxy=browser_proxy,
                 headless=config.basic.browser_headless,
                 log_callback=log_cb,
             )
@@ -149,7 +152,7 @@ class RegisterService(BaseTaskService[RegisterTask]):
             # undetected-chromedriver 引擎：支持有头和无头
             automation = GeminiAutomationUC(
                 user_agent=self.user_agent,
-                proxy=config.basic.proxy,
+                proxy=browser_proxy,
                 headless=config.basic.browser_headless,
                 log_callback=log_cb,
             )

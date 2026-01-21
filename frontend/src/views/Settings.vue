@@ -41,9 +41,19 @@
                   class="w-full rounded-2xl border border-input bg-background px-3 py-2 text-sm"
                   placeholder="自动检测或手动填写"
                 />
-                <label class="block text-xs text-muted-foreground">代理地址</label>
+                <label class="block text-xs text-muted-foreground">代理地址（HTTP 请求）</label>
                 <input
                   v-model="localSettings.basic.proxy"
+                  type="text"
+                  class="w-full rounded-2xl border border-input bg-background px-3 py-2 text-sm"
+                  placeholder="http://127.0.0.1:7890"
+                />
+                <div class="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                  <span>代理地址（浏览器自动化）</span>
+                  <HelpTip text="仅用于注册/刷新时的浏览器代理。留空则自动沿用“代理地址（HTTP 请求）”。" />
+                </div>
+                <input
+                  v-model="localSettings.basic.browser_proxy"
                   type="text"
                   class="w-full rounded-2xl border border-input bg-background px-3 py-2 text-sm"
                   placeholder="http://127.0.0.1:7890"
@@ -296,6 +306,9 @@ watch(settings, (value) => {
   next.basic.duckmail_verify_ssl = next.basic.duckmail_verify_ssl ?? true
   next.basic.browser_engine = next.basic.browser_engine || 'dp'
   next.basic.browser_headless = next.basic.browser_headless ?? false
+  next.basic.browser_proxy = typeof next.basic.browser_proxy === 'string'
+    ? next.basic.browser_proxy
+    : ''
   next.basic.refresh_window_hours = Number.isFinite(next.basic.refresh_window_hours)
     ? next.basic.refresh_window_hours
     : 1

@@ -54,9 +54,12 @@ export interface Settings {
     api_key?: string
     base_url?: string
     proxy?: string
+    browser_proxy?: string
+    mail_provider?: string
     duckmail_base_url?: string
     duckmail_api_key?: string
     duckmail_verify_ssl?: boolean
+    chatgpt_mail_base_url?: string
     browser_engine?: string
     browser_headless?: boolean
     refresh_window_hours?: number

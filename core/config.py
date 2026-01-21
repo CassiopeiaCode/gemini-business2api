@@ -46,6 +46,7 @@ class BasicConfig(BaseModel):
     api_key: str = Field(default="", description="API访问密钥（留空则公开访问）")
     base_url: str = Field(default="", description="服务器URL（留空则自动检测）")
     proxy: str = Field(default="", description="代理地址")
+    browser_proxy: str = Field(default="", description="浏览器代理地址（仅自动化浏览器使用）")
     mail_provider: str = Field(default="duckmail", description="邮箱提供商：duckmail 或 chatgpt")
     duckmail_base_url: str = Field(default="https://api.duckmail.sbs", description="DuckMail API地址")
     duckmail_api_key: str = Field(default="", description="DuckMail API key")
@@ -77,6 +78,7 @@ class RetryConfig(BaseModel):
     rate_limit_cooldown_seconds: int = Field(default=600, ge=60, le=3600, description="429冷却时间（秒）")
     session_cache_ttl_seconds: int = Field(default=3600, ge=300, le=86400, description="会话缓存时间（秒）")
     auto_refresh_accounts_seconds: int = Field(default=60, ge=0, le=600, description="自动刷新账号间隔（秒，0禁用）")
+    login_refresh_polling_seconds: int = Field(default=1800, ge=0, le=86400, description="账户过期检查轮询间隔（秒，0禁用）")
 
 
 class PublicDisplayConfig(BaseModel):
@@ -153,6 +155,7 @@ class ConfigManager:
             api_key=basic_data.get("api_key") or "",
             base_url=basic_data.get("base_url") or "",
             proxy=basic_data.get("proxy") or "",
+            browser_proxy=basic_data.get("browser_proxy") or "",
             mail_provider=basic_data.get("mail_provider") or "duckmail",
             duckmail_base_url=basic_data.get("duckmail_base_url") or "https://api.duckmail.sbs",
             duckmail_api_key=str(duckmail_api_key_raw or "").strip(),
@@ -326,6 +329,11 @@ class ConfigManager:
     def auto_refresh_accounts_seconds(self) -> int:
         """自动刷新账号间隔（秒，0禁用）"""
         return self._config.retry.auto_refresh_accounts_seconds
+
+    @property
+    def login_refresh_polling_seconds(self) -> int:
+        """账户过期检查轮询间隔（秒，0禁用）"""
+        return self._config.retry.login_refresh_polling_seconds
 
 
 # ==================== 全局配置管理器 ====================

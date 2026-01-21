@@ -280,12 +280,65 @@ http_client = httpx.AsyncClient(
     proxy=PROXY or None,
     verify=False,
     http2=False,
-    timeout=httpx.Timeout(TIMEOUT_SECONDS, connect=60.0),
+    timeout=httpx.Timeout(TIMEOUT_SECONDS, connect=60.0, pool=5.0),
     limits=httpx.Limits(
         max_keepalive_connections=100,  # 增加5倍：20 -> 100
         max_connections=200              # 增加4倍：50 -> 200
     )
 )
+
+_http_client_lock = asyncio.Lock()
+
+
+def _is_http_client_closed_error(exc: Exception) -> bool:
+    msg = str(exc) or ""
+    return isinstance(exc, RuntimeError) and (
+        "client has been closed" in msg.lower()
+        or "cannot send a request" in msg.lower()
+    )
+
+
+async def rebuild_http_client(reason: str = "") -> None:
+    """
+    重建全局 http_client（自愈逻辑）：
+    - 先创建新 client 并替换全局引用（减少并发窗口）
+    - 再更新 multi_account_mgr 内的引用
+    - 最后关闭旧 client
+    """
+    global http_client
+    global multi_account_mgr
+
+    async with _http_client_lock:
+        old_client = http_client
+        new_client = httpx.AsyncClient(
+            proxy=PROXY or None,
+            verify=False,
+            http2=False,
+            timeout=httpx.Timeout(TIMEOUT_SECONDS, connect=60.0, pool=5.0),
+            limits=httpx.Limits(
+                max_keepalive_connections=100,
+                max_connections=200
+            )
+        )
+
+        http_client = new_client
+        try:
+            multi_account_mgr.update_http_client(new_client)
+        except Exception:
+            pass
+
+        try:
+            await asyncio.wait_for(old_client.aclose(), timeout=3.0)
+        except asyncio.TimeoutError:
+            logger.critical("[HTTP] http_client 关闭超时，触发进程退出以便容器重启")
+            raise SystemExit(1)
+        except Exception:
+            pass
+
+        if reason:
+            logger.warning(f"[HTTP] http_client 已重建: {reason}")
+        else:
+            logger.warning("[HTTP] http_client 已重建")
 
 # ---------- 工具函数 ----------
 def get_base_url(request: Request) -> str:
@@ -358,6 +411,7 @@ try:
         SESSION_CACHE_TTL_SECONDS,
         _get_global_stats,
         _set_multi_account_mgr,
+        register_service=register_service,
     )
 except Exception as e:
     logger.warning("[SYSTEM] 自动注册/刷新服务不可用: %s", e)
@@ -580,8 +634,12 @@ async def startup_event():
     # 启动自动登录刷新轮询
     if login_service:
         try:
+            polling_seconds = int(getattr(config_manager, "login_refresh_polling_seconds", 1800) or 0)
             asyncio.create_task(login_service.start_polling())
-            logger.info("[SYSTEM] 账户过期检查轮询已启动（间隔: 30分钟）")
+            if polling_seconds > 0:
+                logger.info(f"[SYSTEM] 账户过期检查轮询已启动（间隔: {polling_seconds}秒）")
+            else:
+                logger.info("[SYSTEM] 账户过期检查轮询已禁用（配置为0）")
         except Exception as e:
             logger.error(f"[SYSTEM] 启动登录服务失败: {e}")
     else:
@@ -1128,6 +1186,7 @@ async def admin_get_settings(request: Request):
             "api_key": config.basic.api_key,
             "base_url": config.basic.base_url,
             "proxy": config.basic.proxy,
+            "browser_proxy": config.basic.browser_proxy,
             "mail_provider": config.basic.mail_provider,
             "duckmail_base_url": config.basic.duckmail_base_url,
             "duckmail_api_key": config.basic.duckmail_api_key,
@@ -1151,7 +1210,8 @@ async def admin_get_settings(request: Request):
             "account_failure_threshold": config.retry.account_failure_threshold,
             "rate_limit_cooldown_seconds": config.retry.rate_limit_cooldown_seconds,
             "session_cache_ttl_seconds": config.retry.session_cache_ttl_seconds,
-            "auto_refresh_accounts_seconds": config.retry.auto_refresh_accounts_seconds
+            "auto_refresh_accounts_seconds": config.retry.auto_refresh_accounts_seconds,
+            "login_refresh_polling_seconds": getattr(config.retry, "login_refresh_polling_seconds", 1800),
         },
         "public_display": {
             "logo_url": config.public_display.logo_url,
@@ -1184,6 +1244,7 @@ async def admin_update_settings(request: Request, new_settings: dict = Body(...)
         basic.setdefault("refresh_window_hours", config.basic.refresh_window_hours)
         basic.setdefault("register_default_count", config.basic.register_default_count)
         basic.setdefault("register_domain", config.basic.register_domain)
+        basic.setdefault("browser_proxy", config.basic.browser_proxy)
         if not isinstance(basic.get("register_domain"), str):
             basic["register_domain"] = ""
         basic.pop("duckmail_proxy", None)
@@ -1198,6 +1259,7 @@ async def admin_update_settings(request: Request, new_settings: dict = Body(...)
 
         retry = dict(new_settings.get("retry") or {})
         retry.setdefault("auto_refresh_accounts_seconds", config.retry.auto_refresh_accounts_seconds)
+        retry.setdefault("login_refresh_polling_seconds", getattr(config.retry, "login_refresh_polling_seconds", 1800))
         new_settings["retry"] = retry
 
         # 保存旧配置用于对比
@@ -1234,19 +1296,7 @@ async def admin_update_settings(request: Request, new_settings: dict = Body(...)
         # 检查是否需要重建 HTTP 客户端（代理变化）
         if old_proxy != PROXY:
             logger.info(f"[CONFIG] 代理配置已变化，重建 HTTP 客户端")
-            await http_client.aclose()  # 关闭旧客户端
-            http_client = httpx.AsyncClient(
-                proxy=PROXY or None,
-                verify=False,
-                http2=False,
-                timeout=httpx.Timeout(TIMEOUT_SECONDS, connect=60.0),
-                limits=httpx.Limits(
-                    max_keepalive_connections=100,
-                    max_connections=200
-                )
-            )
-            # 更新所有账户的 http_client 引用
-            multi_account_mgr.update_http_client(http_client)
+            await rebuild_http_client(reason="proxy_changed")
 
         # 检查是否需要更新账户管理器配置（重试策略变化）
         retry_changed = (
@@ -1472,7 +1522,15 @@ async def chat_impl(
             for attempt in range(max_account_tries):
                 try:
                     account_manager = await multi_account_mgr.get_account(None, request_id)
-                    google_session = await create_google_session(account_manager, http_client, USER_AGENT, request_id)
+                    try:
+                        google_session = await create_google_session(account_manager, http_client, USER_AGENT, request_id)
+                    except Exception as e:
+                        if _is_http_client_closed_error(e):
+                            await rebuild_http_client(reason="client_closed_during_create_session")
+                            google_session = await create_google_session(account_manager, http_client, USER_AGENT, request_id)
+                        else:
+                            raise
+
                     # 线程安全地绑定账户到此对话
                     await multi_account_mgr.set_session_cache(
                         conv_key,
