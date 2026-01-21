@@ -200,6 +200,7 @@ class MultiAccountManager:
         self._session_locks: Dict[str, asyncio.Lock] = {}
         self._session_locks_lock = asyncio.Lock()  # 保护锁字典的锁
         self._session_locks_max_size = 2000  # 最大锁数量
+        self._last_auto_recover_ts = 0.0  # “无可用账号”自愈节流时间戳（秒）
 
     def _clean_expired_cache(self):
         """清理过期的缓存条目"""
@@ -288,6 +289,59 @@ class MultiAccountManager:
         self.account_list.append(config.account_id)
         logger.info(f"[MULTI] [ACCOUNT] 添加账户: {config.account_id}")
 
+    def _auto_recover_if_all_error_disabled(self, request_id: str = "") -> bool:
+        """
+        自愈逻辑：
+        - 仅当“所有账号都处于错误禁用态”时才恢复（避免误伤 429 冷却中的账号）
+        - 10分钟最多触发1次（全局节流）
+        """
+        req_tag = f"[req_{request_id}] " if request_id else ""
+        now = time.time()
+
+        if now - self._last_auto_recover_ts < 600:
+            return False
+
+        candidates: List[AccountManager] = []
+        for acc_id in self.account_list:
+            account = self.accounts.get(acc_id)
+            if not account:
+                continue
+            if account.config.disabled or account.config.is_expired():
+                continue
+            candidates.append(account)
+
+        if not candidates:
+            return False
+
+        any_rate_limited = False
+        all_error_disabled = True
+
+        for account in candidates:
+            # 仍在 429 冷却期：不允许触发“全部错误禁用自愈”
+            if account.last_429_time > 0 and (now - account.last_429_time) < account.rate_limit_cooldown_seconds:
+                any_rate_limited = True
+                all_error_disabled = False
+                break
+            if account.is_available:
+                all_error_disabled = False
+                break
+
+        if any_rate_limited or not all_error_disabled:
+            return False
+
+        recovered = 0
+        for account in candidates:
+            # 清理“冷却已过但 last_429_time 未清理”的残留，避免状态展示/判定混淆
+            if account.last_429_time > 0 and (now - account.last_429_time) >= account.rate_limit_cooldown_seconds:
+                account.last_429_time = 0.0
+            account.is_available = True
+            account.error_count = 0
+            account.last_error_time = 0.0
+            recovered += 1
+
+        self._last_auto_recover_ts = now
+        logger.warning(f"[MULTI] [ACCOUNT] {req_tag}检测到所有账号均为错误禁用态，已自动恢复 {recovered} 个账号（10分钟节流）")
+        return recovered > 0
     async def get_account(self, account_id: Optional[str] = None, request_id: str = "") -> AccountManager:
         """获取账户 (智能选择或指定) - 优先选择健康账户，提升响应速度"""
         req_tag = f"[req_{request_id}] " if request_id else ""
@@ -302,19 +356,26 @@ class MultiAccountManager:
             return account
 
         # 智能选择可用账户（优先健康账户，提升响应速度）
-        available_accounts = []
-        for acc_id in self.account_list:
-            account = self.accounts[acc_id]
-            # 检查账户是否可用（会自动恢复429冷却期后的账户）
-            if (account.should_retry() and
-                not account.config.is_expired() and
-                not account.config.disabled):
-                # 计算账户健康度（error_count越低越健康）
-                health_score = -account.error_count  # 负数，越大越健康
-                available_accounts.append((acc_id, health_score))
+        def collect_available() -> list:
+            out = []
+            for acc_id in self.account_list:
+                account = self.accounts[acc_id]
+                # 检查账户是否可用（会自动恢复429冷却期后的账户）
+                if (account.should_retry() and
+                    not account.config.is_expired() and
+                    not account.config.disabled):
+                    # 计算账户健康度（error_count越低越健康）
+                    health_score = -account.error_count  # 负数，越大越健康
+                    out.append((acc_id, health_score))
+            return out
+        available_accounts = collect_available()
 
         if not available_accounts:
-            raise HTTPException(503, "No available accounts")
+            # 仅当所有账号均处于“错误禁用”时才触发自愈；429 冷却中的账号不恢复
+            if self._auto_recover_if_all_error_disabled(request_id=request_id):
+                available_accounts = collect_available()
+            if not available_accounts:
+                raise HTTPException(503, "No available accounts")
 
         # 按健康度排序（优先选择error_count最低的账户）
         available_accounts.sort(key=lambda x: x[1], reverse=True)

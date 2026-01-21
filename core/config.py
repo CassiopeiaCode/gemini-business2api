@@ -73,7 +73,7 @@ class RetryConfig(BaseModel):
     max_new_session_tries: int = Field(default=5, ge=1, le=20, description="新会话尝试账户数")
     max_request_retries: int = Field(default=3, ge=1, le=10, description="请求失败重试次数")
     max_account_switch_tries: int = Field(default=5, ge=1, le=20, description="账户切换尝试次数")
-    account_failure_threshold: int = Field(default=3, ge=1, le=10, description="账户失败阈值")
+    account_failure_threshold: int = Field(default=3, ge=1, le=1000, description="账户失败阈值")
     rate_limit_cooldown_seconds: int = Field(default=600, ge=60, le=3600, description="429冷却时间（秒）")
     session_cache_ttl_seconds: int = Field(default=3600, ge=300, le=86400, description="会话缓存时间（秒）")
     auto_refresh_accounts_seconds: int = Field(default=60, ge=0, le=600, description="自动刷新账号间隔（秒，0禁用）")
