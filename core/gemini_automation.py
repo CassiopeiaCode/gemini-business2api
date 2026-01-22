@@ -59,6 +59,7 @@ class GeminiAutomation:
         options = ChromiumOptions()
         options.set_argument("--incognito")
         options.set_argument("--no-sandbox")
+        options.set_argument("--disable-dev-shm-usage")
         options.set_argument("--disable-setuid-sandbox")
         options.set_argument("--disable-blink-features=AutomationControlled")
         options.set_argument("--window-size=1280,800")
@@ -89,7 +90,6 @@ class GeminiAutomation:
             # 使用新版无头模式，更接近真实浏览器
             options.set_argument("--headless=new")
             options.set_argument("--disable-gpu")
-            options.set_argument("--disable-dev-shm-usage")
             options.set_argument("--no-first-run")
             options.set_argument("--disable-extensions")
             # 反检测参数

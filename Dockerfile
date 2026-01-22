@@ -23,9 +23,11 @@ COPY requirements.txt .
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         gcc \
+        curl \
         tzdata \
         chromium chromium-driver \
         dbus dbus-x11 \
+        xvfb xauth \
         libglib2.0-0 libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
         libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 \
         libxfixes3 libxrandr2 libgbm1 libasound2 libpango-1.0-0 \
@@ -53,8 +55,19 @@ COPY --from=frontend-builder /app/static ./static
 # 创建数据目录
 RUN mkdir -p ./data
 
+# 复制启动脚本
+COPY entrypoint.sh .
+RUN chmod +x entrypoint.sh
+
 # 声明数据卷
 VOLUME ["/app/data"]
 
+# 声明端口
+EXPOSE 7860
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:7860/admin/health || exit 1
+
 # 启动服务
-CMD ["python", "-u", "main.py"]
+CMD ["./entrypoint.sh"]
