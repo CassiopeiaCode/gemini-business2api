@@ -32,7 +32,8 @@ class GeminiAutomationFP:
         log_callback=None,
         fp_chrome_path: str = "",
     ) -> None:
-        self.user_agent = user_agent or self._get_ua()
+        # fingerprint-chromium 使用浏览器默认 UA，不设置自定义 UA
+        self.user_agent = ""
         self.proxy = proxy
         self.headless = headless
         self.timeout = timeout
@@ -119,7 +120,8 @@ class GeminiAutomationFP:
         options.set_argument("--disable-setuid-sandbox")
         options.set_argument("--disable-blink-features=AutomationControlled")
         options.set_argument("--window-size=1280,800")
-        options.set_user_agent(self.user_agent)
+        # fingerprint-chromium 使用浏览器默认 UA，不设置自定义 UA
+        # options.set_user_agent(self.user_agent)
 
         # fingerprint-chromium 指纹参数（核心）
         options.set_argument(f"--fingerprint={self.fingerprint_seed}")
@@ -160,35 +162,9 @@ class GeminiAutomationFP:
         page = ChromiumPage(options)
         page.set.timeouts(self.timeout)
 
-        # 反检测：注入脚本隐藏自动化特征
-        if self.headless:
-            try:
-                page.run_cdp("Page.addScriptToEvaluateOnNewDocument", source="""
-                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                    Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-                    Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en']});
-                    window.chrome = {runtime: {}};
-
-                    // 额外的反检测措施
-                    Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 1});
-                    Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
-                    Object.defineProperty(navigator, 'vendor', {get: () => 'Google Inc.'});
-
-                    // 隐藏 headless 特征
-                    Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
-                    Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
-
-                    // 模拟真实的 permissions
-                    const originalQuery = window.navigator.permissions.query;
-                    window.navigator.permissions.query = (parameters) => (
-                        parameters.name === 'notifications' ?
-                            Promise.resolve({state: Notification.permission}) :
-                            originalQuery(parameters)
-                    );
-                """)
-            except Exception:
-                pass
-
+        # fingerprint-chromium 自带反检测，不需要注入脚本
+        # 浏览器指纹随机化由 --fingerprint 参数控制
+        
         self._log("info", f"fingerprint-chromium started with seed: {self.fingerprint_seed}")
         return page
 
