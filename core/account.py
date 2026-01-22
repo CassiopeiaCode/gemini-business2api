@@ -204,6 +204,14 @@ class MultiAccountManager:
 
     def _clean_expired_cache(self):
         """清理过期的缓存条目"""
+        # 如果 TTL 为 0，禁用缓存，清空所有缓存
+        if self.cache_ttl == 0:
+            if self.global_session_cache:
+                count = len(self.global_session_cache)
+                self.global_session_cache.clear()
+                logger.info(f"[CACHE] 缓存已禁用(TTL=0)，清空 {count} 个会话缓存")
+            return
+        
         current_time = time.time()
         expired_keys = [
             key for key, value in self.global_session_cache.items()
@@ -242,6 +250,10 @@ class MultiAccountManager:
 
     async def set_session_cache(self, conv_key: str, account_id: str, session_id: str):
         """线程安全地设置会话缓存"""
+        # 如果 TTL 为 0，禁用缓存，不保存
+        if self.cache_ttl == 0:
+            return
+        
         async with self._cache_lock:
             self.global_session_cache[conv_key] = {
                 "account_id": account_id,
@@ -253,6 +265,10 @@ class MultiAccountManager:
 
     async def update_session_time(self, conv_key: str):
         """线程安全地更新会话时间戳"""
+        # 如果 TTL 为 0，禁用缓存，不更新
+        if self.cache_ttl == 0:
+            return
+        
         async with self._cache_lock:
             if conv_key in self.global_session_cache:
                 self.global_session_cache[conv_key]["updated_at"] = time.time()

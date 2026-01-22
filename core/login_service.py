@@ -263,52 +263,180 @@ class LoginService(BaseTaskService[LoginTask]):
 
         return expiring
 
-    async def check_and_refresh(self) -> None:
-        if os.environ.get("ACCOUNTS_CONFIG"):
-            logger.info("[LOGIN] ACCOUNTS_CONFIG set, skipping refresh")
+    async def _auto_heal_account_pool(self) -> None:
+        """自愈逻辑：监控账户池健康度，自动触发注册任务"""
+        if not self.register_service:
+            logger.info("[HEAL] register service not available, auto-heal disabled")
             return
 
-        # 自愈逻辑：如果“非可用状态”的账号占比过高(>60%)，且没有注册任务在跑，则触发注册 10 个新账号
-        # 非可用：AccountManager.should_retry() == False（包含 429 冷却中 & 错误禁用）
-        try:
-            candidates = [
-                acc for acc in self.multi_account_mgr.accounts.values()
-                if (not acc.config.disabled) and (not acc.config.is_expired())
-            ]
-            total = len(candidates)
-            if total > 0:
-                unavailable = 0
-                for acc in candidates:
-                    if not acc.should_retry():
-                        unavailable += 1
+        logger.info("[HEAL] account pool health monitor started")
+        
+        # 使用与 login_refresh_polling_seconds 相同的间隔
+        while self._is_polling:
+            try:
+                # 获取当前轮询间隔
+                polling_seconds = int(getattr(config.retry, "login_refresh_polling_seconds", 1800) or 0)
+                if polling_seconds <= 0:
+                    logger.info("[HEAL] polling disabled, stopping health monitor")
+                    break
 
+                await asyncio.sleep(polling_seconds)
+
+                if os.environ.get("ACCOUNTS_CONFIG"):
+                    continue
+
+                # 计算不可用账户占比
+                candidates = [
+                    acc for acc in self.multi_account_mgr.accounts.values()
+                    if (not acc.config.disabled) and (not acc.config.is_expired())
+                ]
+                total = len(candidates)
+                
+                if total == 0:
+                    logger.warning("[HEAL] no available accounts in pool")
+                    continue
+
+                unavailable = sum(1 for acc in candidates if not acc.should_retry())
                 ratio = unavailable / total
-                if ratio > 0.60 and self.register_service is not None:
+
+                logger.info(
+                    "[HEAL] account pool status: %s/%s unavailable (%.1f%%)",
+                    unavailable,
+                    total,
+                    ratio * 100.0,
+                )
+
+                # 触发自愈：占比 > 60% 且没有注册任务在运行
+                if ratio > 0.60:
                     current_task = self.register_service.get_current_task()
                     is_running = bool(current_task and current_task.status == TaskStatus.RUNNING)
-                    if not is_running:
+                    
+                    if is_running:
+                        logger.info("[HEAL] register task already running, skipping auto-heal")
+                    else:
                         logger.warning(
-                            "[LOGIN] unavailable accounts ratio too high: %s/%s (%.0f%%); starting register task (count=10)",
-                            unavailable,
-                            total,
+                            "[HEAL] triggering auto-heal: unavailable ratio too high (%.0f%%), registering 10 new accounts",
                             ratio * 100.0,
                         )
                         try:
                             await self.register_service.start_register(count=10)
+                            logger.info("[HEAL] auto-heal register task started successfully")
                         except Exception as exc:
-                            logger.error("[LOGIN] failed to start register task: %s", exc)
-        except Exception as exc:
-            logger.error("[LOGIN] unavailable ratio check failed: %s", exc)
+                            logger.error("[HEAL] failed to start register task: %s", exc, exc_info=True)
 
-        expiring_accounts = self._get_expiring_accounts()
-        if not expiring_accounts:
-            logger.debug("[LOGIN] no accounts need refresh")
+            except asyncio.CancelledError:
+                logger.info("[HEAL] health monitor stopped")
+                break
+            except Exception as exc:
+                logger.error("[HEAL] health monitor error: %s", exc, exc_info=True)
+                await asyncio.sleep(60)  # 出错后等待60秒再继续
+
+    async def check_and_refresh(self) -> None:
+        """检查并刷新即将过期的账户，删除已过期账户"""
+        if os.environ.get("ACCOUNTS_CONFIG"):
+            logger.info("[LOGIN] ACCOUNTS_CONFIG set, skipping refresh")
             return
 
         try:
-            await self.start_login(expiring_accounts)
-        except ValueError as exc:
-            logger.warning("[LOGIN] %s", exc)
+            accounts = load_accounts_from_source()
+            beijing_tz = timezone(timedelta(hours=8))
+            now = datetime.now(beijing_tz)
+            
+            accounts_to_refresh = []
+            accounts_to_delete = []
+            
+            for account in accounts:
+                if account.get("disabled"):
+                    continue
+                    
+                account_id = account.get("id")
+                expires_at = account.get("expires_at")
+                
+                if not expires_at:
+                    continue
+
+                # 检查邮件凭证是否完整
+                mail_provider = (account.get("mail_provider") or "").lower()
+                if not mail_provider:
+                    if account.get("mail_client_id") or account.get("mail_refresh_token"):
+                        mail_provider = "microsoft"
+                    else:
+                        mail_provider = "duckmail"
+
+                has_credentials = False
+                if mail_provider == "microsoft":
+                    has_credentials = bool(account.get("mail_client_id") and account.get("mail_refresh_token"))
+                elif mail_provider in ("chatgpt_mail", "chatgpt"):
+                    has_credentials = True  # ChatGPT Mail 不需要密码
+                else:  # duckmail
+                    has_credentials = bool(account.get("mail_password") or account.get("email_password"))
+
+                if not has_credentials:
+                    continue
+
+                # 解析过期时间
+                try:
+                    expire_time = datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S")
+                    expire_time = expire_time.replace(tzinfo=beijing_tz)
+                    remaining_hours = (expire_time - now).total_seconds() / 3600
+                except Exception as parse_exc:
+                    logger.error(
+                        "[LOGIN] failed to parse expires_at for account %s: %s (value: %s)",
+                        account_id,
+                        parse_exc,
+                        expires_at,
+                    )
+                    continue
+
+                # 判断处理策略
+                if remaining_hours < -1:
+                    # 已过期超过1小时：删除
+                    logger.warning(
+                        "[LOGIN] account %s expired %.1f hours ago, marking for deletion",
+                        account_id,
+                        abs(remaining_hours),
+                    )
+                    accounts_to_delete.append(account_id)
+                elif remaining_hours <= config.basic.refresh_window_hours:
+                    # 即将过期或刚过期不到1小时：刷新
+                    if remaining_hours < 0:
+                        logger.info(
+                            "[LOGIN] account %s expired %.1f hours ago (within grace period), marking for refresh",
+                            account_id,
+                            abs(remaining_hours),
+                        )
+                    else:
+                        logger.info(
+                            "[LOGIN] account %s will expire in %.1f hours, marking for refresh",
+                            account_id,
+                            remaining_hours,
+                        )
+                    accounts_to_refresh.append(account_id)
+
+            # 删除已过期账户
+            if accounts_to_delete:
+                logger.info("[LOGIN] deleting %s expired accounts: %s", len(accounts_to_delete), accounts_to_delete)
+                try:
+                    updated_accounts = [acc for acc in accounts if acc.get("id") not in accounts_to_delete]
+                    self._apply_accounts_update(updated_accounts)
+                    logger.info("[LOGIN] successfully deleted %s expired accounts", len(accounts_to_delete))
+                except Exception as delete_exc:
+                    logger.error("[LOGIN] failed to delete expired accounts: %s", delete_exc, exc_info=True)
+
+            # 刷新即将过期的账户
+            if accounts_to_refresh:
+                logger.info("[LOGIN] refreshing %s expiring accounts: %s", len(accounts_to_refresh), accounts_to_refresh)
+                try:
+                    await self.start_login(accounts_to_refresh)
+                except ValueError as exc:
+                    logger.warning("[LOGIN] %s", exc)
+                except Exception as refresh_exc:
+                    logger.error("[LOGIN] failed to start refresh task: %s", refresh_exc, exc_info=True)
+            else:
+                logger.debug("[LOGIN] no accounts need refresh")
+
+        except Exception as exc:
+            logger.error("[LOGIN] check_and_refresh failed: %s", exc, exc_info=True)
 
     async def start_polling(self) -> None:
         polling_seconds = int(getattr(config.retry, "login_refresh_polling_seconds", 1800) or 0)
@@ -322,6 +450,13 @@ class LoginService(BaseTaskService[LoginTask]):
 
         self._is_polling = True
         logger.info("[LOGIN] refresh polling started (interval: %s seconds)", polling_seconds)
+        
+        # 启动独立的自愈协程
+        heal_task = None
+        if self.register_service:
+            heal_task = asyncio.create_task(self._auto_heal_account_pool())
+            logger.info("[LOGIN] account pool health monitor started as separate task")
+        
         try:
             while self._is_polling:
                 await self.check_and_refresh()
@@ -334,9 +469,17 @@ class LoginService(BaseTaskService[LoginTask]):
         except asyncio.CancelledError:
             logger.info("[LOGIN] polling stopped")
         except Exception as exc:
-            logger.error("[LOGIN] polling error: %s", exc)
+            logger.error("[LOGIN] polling error: %s", exc, exc_info=True)
         finally:
             self._is_polling = False
+            # 取消自愈协程
+            if heal_task and not heal_task.done():
+                heal_task.cancel()
+                try:
+                    await heal_task
+                except asyncio.CancelledError:
+                    pass
+                logger.info("[LOGIN] health monitor task cancelled")
 
     def stop_polling(self) -> None:
         self._is_polling = False

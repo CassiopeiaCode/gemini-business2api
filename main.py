@@ -1594,8 +1594,8 @@ async def chat_impl(
 
     # 4. 准备文本内容
     if is_new_conversation:
-        # 新对话只发送最后一条
-        text_to_send = last_text
+        # 新对话发送完整上下文（包含所有历史消息）
+        text_to_send = build_full_context_text(req.messages)
         is_retry_mode = True
     else:
         # 继续对话只发送当前消息
