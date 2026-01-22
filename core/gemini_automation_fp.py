@@ -115,6 +115,7 @@ class GeminiAutomationFP:
         # 基础参数
         options.set_argument("--incognito")
         options.set_argument("--no-sandbox")
+        options.set_argument("--disable-dev-shm-usage")
         options.set_argument("--disable-setuid-sandbox")
         options.set_argument("--disable-blink-features=AutomationControlled")
         options.set_argument("--window-size=1280,800")
@@ -149,7 +150,6 @@ class GeminiAutomationFP:
             # 使用新版无头模式
             options.set_argument("--headless=new")
             options.set_argument("--disable-gpu")
-            options.set_argument("--disable-dev-shm-usage")
             options.set_argument("--no-first-run")
             options.set_argument("--disable-extensions")
             # 反检测参数
@@ -250,27 +250,35 @@ class GeminiAutomationFP:
             self._save_screenshot(page, "code_input_missing")
             return {"success": False, "error": "code input not found"}
 
-        # Step 5: 轮询邮件获取验证码（传入发送时间）
-        self._log("info", "polling for verification code")
-        code = mail_client.poll_for_code(timeout=40, interval=4, since_time=send_time)
-
-        if not code:
-            self._log("warning", "verification code timeout, trying to resend")
+        # Step 5: 轮询邮件获取验证码（10秒超时，最多重发3次，每次等待30秒）
+        self._log("info", "polling for verification code (10s timeout)")
+        code = mail_client.poll_for_code(timeout=10, interval=2, since_time=send_time)
+        
+        # 如果10秒内没收到，尝试重发最多3次
+        max_resend_attempts = 3
+        for attempt in range(max_resend_attempts):
+            if code:
+                break
+                
+            self._log("warning", f"verification code not received in 10s, resending ({attempt + 1}/{max_resend_attempts})")
+            
             # 更新发送时间（在点击按钮之前记录）
             send_time = datetime.now()
-            # 尝试点击重新发送按钮
-            if self._click_resend_code_button(page):
-                self._log("info", "resend button clicked, waiting for new code")
-                # 再次轮询验证码
-                code = mail_client.poll_for_code(timeout=40, interval=4, since_time=send_time)
-                if not code:
-                    self._log("error", "verification code timeout after resend")
-                    self._save_screenshot(page, "code_timeout_after_resend")
-                    return {"success": False, "error": "verification code timeout after resend"}
-            else:
-                self._log("error", "verification code timeout and resend button not found")
-                self._save_screenshot(page, "code_timeout")
-                return {"success": False, "error": "verification code timeout"}
+            
+            # 点击重新发送按钮
+            if not self._click_resend_code_button(page):
+                self._log("error", "resend button not found")
+                self._save_screenshot(page, "resend_button_missing")
+                return {"success": False, "error": "resend button not found"}
+            
+            self._log("info", f"resend button clicked, waiting 30s for new code")
+            # 等待10秒接收新验证码
+            code = mail_client.poll_for_code(timeout=10, interval=2, since_time=send_time)
+        
+        if not code:
+            self._log("error", f"verification code timeout after {max_resend_attempts} resend attempts")
+            self._save_screenshot(page, "code_timeout_final")
+            return {"success": False, "error": f"verification code timeout after {max_resend_attempts} resends"}
 
         self._log("info", f"code received: {code}")
 
