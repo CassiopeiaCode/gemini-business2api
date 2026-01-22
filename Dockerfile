@@ -43,12 +43,6 @@ COPY main.py .
 COPY core ./core
 COPY util ./util
 
-# 复制 fingerprint-chromium 浏览器（如果存在）
-COPY ungoogled-chromium-142.0.7444.175-1-x86_64_linux ./ungoogled-chromium-142.0.7444.175-1-x86_64_linux
-
-# 设置 chrome 可执行权限
-RUN chmod +x ./ungoogled-chromium-142.0.7444.175-1-x86_64_linux/chrome
-
 # 从 builder 阶段只复制构建好的静态文件
 COPY --from=frontend-builder /app/static ./static
 
