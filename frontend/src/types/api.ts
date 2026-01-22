@@ -62,6 +62,7 @@ export interface Settings {
     chatgpt_mail_base_url?: string
     browser_engine?: string
     browser_headless?: boolean
+    fp_chrome_path?: string
     refresh_window_hours?: number
     register_default_count?: number
     register_domain?: string

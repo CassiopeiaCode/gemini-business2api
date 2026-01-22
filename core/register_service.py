@@ -13,6 +13,7 @@ from core.duckmail_client import DuckMailClient
 from core.chatgpt_mail_client import ChatGPTMailClient
 from core.gemini_automation import GeminiAutomation
 from core.gemini_automation_uc import GeminiAutomationUC
+from core.gemini_automation_fp import GeminiAutomationFP
 
 logger = logging.getLogger("gemini.register")
 
@@ -140,17 +141,26 @@ class RegisterService(BaseTaskService[RegisterTask]):
 
         # 根据配置选择浏览器引擎
         browser_engine = (config.basic.browser_engine or "dp").lower()
-        if browser_engine == "dp":
-            # DrissionPage 引擎：支持有头和无头模式
-            automation = GeminiAutomation(
+        if browser_engine == "fp":
+            # fingerprint-chromium 引擎：最强反检测，支持浏览器指纹隔离
+            automation = GeminiAutomationFP(
+                user_agent=self.user_agent,
+                proxy=browser_proxy,
+                headless=config.basic.browser_headless,
+                log_callback=log_cb,
+                fp_chrome_path=config.basic.fp_chrome_path,
+            )
+        elif browser_engine == "uc":
+            # undetected-chromedriver 引擎：支持有头和无头
+            automation = GeminiAutomationUC(
                 user_agent=self.user_agent,
                 proxy=browser_proxy,
                 headless=config.basic.browser_headless,
                 log_callback=log_cb,
             )
         else:
-            # undetected-chromedriver 引擎：支持有头和无头
-            automation = GeminiAutomationUC(
+            # DrissionPage 引擎：支持有头和无头模式（默认）
+            automation = GeminiAutomation(
                 user_agent=self.user_agent,
                 proxy=browser_proxy,
                 headless=config.basic.browser_headless,

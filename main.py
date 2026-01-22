@@ -1194,6 +1194,7 @@ async def admin_get_settings(request: Request):
             "chatgpt_mail_base_url": config.basic.chatgpt_mail_base_url,
             "browser_engine": config.basic.browser_engine,
             "browser_headless": config.basic.browser_headless,
+            "fp_chrome_path": config.basic.fp_chrome_path,
             "refresh_window_hours": config.basic.refresh_window_hours,
             "register_default_count": config.basic.register_default_count,
             "register_domain": config.basic.register_domain,
@@ -1241,6 +1242,7 @@ async def admin_update_settings(request: Request, new_settings: dict = Body(...)
         basic.setdefault("chatgpt_mail_base_url", config.basic.chatgpt_mail_base_url)
         basic.setdefault("browser_engine", config.basic.browser_engine)
         basic.setdefault("browser_headless", config.basic.browser_headless)
+        basic.setdefault("fp_chrome_path", config.basic.fp_chrome_path)
         basic.setdefault("refresh_window_hours", config.basic.refresh_window_hours)
         basic.setdefault("register_default_count", config.basic.register_default_count)
         basic.setdefault("register_domain", config.basic.register_domain)

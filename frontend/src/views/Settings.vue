@@ -86,13 +86,25 @@
                 </div>
                 <div class="flex items-center justify-between gap-2 text-xs text-muted-foreground">
                   <span>浏览器引擎</span>
-                  <HelpTip text="UC: 支持无头/有头，但可能失败。DP: 支持无头/有头，更稳定，推荐使用。" />
+                  <HelpTip text="DP: 稳定推荐。UC: 反检测较好。FP: 最强反检测，支持指纹隔离（需安装 fingerprint-chromium）。" />
                 </div>
                 <SelectMenu
                   v-model="localSettings.basic.browser_engine"
                   :options="browserEngineOptions"
                   class="w-full"
                 />
+                <template v-if="localSettings.basic.browser_engine === 'fp'">
+                  <div class="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                    <span>fingerprint-chromium 路径</span>
+                    <HelpTip text="留空则自动检测。Windows: chrome.exe 路径，Linux: 可执行文件路径，macOS: .app 内的可执行文件路径。" />
+                  </div>
+                  <input
+                    v-model="localSettings.basic.fp_chrome_path"
+                    type="text"
+                    class="w-full rounded-2xl border border-input bg-background px-3 py-2 text-sm"
+                    placeholder="留空则自动检测"
+                  />
+                </template>
                 <template v-if="localSettings.basic.mail_provider === 'duckmail'">
                   <label class="block text-xs text-muted-foreground">DuckMail API</label>
                   <input
@@ -270,8 +282,9 @@ const mailProviderOptions = [
   { label: 'ChatGPT Mail - 自动获取邮箱', value: 'chatgpt' },
 ]
 const browserEngineOptions = [
-  { label: 'UC - 支持无头/有头', value: 'uc' },
-  { label: 'DP - 支持无头/有头（推荐）', value: 'dp' },
+  { label: 'DP - 稳定推荐', value: 'dp' },
+  { label: 'UC - 反检测较好', value: 'uc' },
+  { label: 'FP - 最强反检测（fingerprint-chromium）', value: 'fp' },
 ]
 const imageOutputOptions = [
   { label: 'Base64 编码', value: 'base64' },
@@ -308,6 +321,9 @@ watch(settings, (value) => {
   next.basic.browser_headless = next.basic.browser_headless ?? false
   next.basic.browser_proxy = typeof next.basic.browser_proxy === 'string'
     ? next.basic.browser_proxy
+    : ''
+  next.basic.fp_chrome_path = typeof next.basic.fp_chrome_path === 'string'
+    ? next.basic.fp_chrome_path
     : ''
   next.basic.refresh_window_hours = Number.isFinite(next.basic.refresh_window_hours)
     ? next.basic.refresh_window_hours
