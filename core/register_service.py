@@ -141,16 +141,7 @@ class RegisterService(BaseTaskService[RegisterTask]):
 
         # 根据配置选择浏览器引擎
         browser_engine = (config.basic.browser_engine or "dp").lower()
-        if browser_engine == "fp":
-            # fingerprint-chromium 引擎：最强反检测，支持浏览器指纹隔离
-            automation = GeminiAutomationFP(
-                user_agent=self.user_agent,
-                proxy=browser_proxy,
-                headless=config.basic.browser_headless,
-                log_callback=log_cb,
-                fp_chrome_path=config.basic.fp_chrome_path,
-            )
-        elif browser_engine == "uc":
+        if browser_engine == "uc":
             # undetected-chromedriver 引擎：支持有头和无头
             automation = GeminiAutomationUC(
                 user_agent=self.user_agent,
@@ -158,8 +149,17 @@ class RegisterService(BaseTaskService[RegisterTask]):
                 headless=config.basic.browser_headless,
                 log_callback=log_cb,
             )
+        elif browser_engine == "dp-fc" or browser_engine == "fp":
+            # DrissionPage + fingerprint-chromium 引擎
+            automation = GeminiAutomationFP(
+                user_agent=self.user_agent,
+                proxy=browser_proxy,
+                headless=config.basic.browser_headless,
+                log_callback=log_cb,
+                fp_chrome_path=config.basic.fp_chrome_path,
+            )
         else:
-            # DrissionPage 引擎：支持有头和无头模式（默认）
+            # DrissionPage 引擎（默认）：支持有头和无头模式
             automation = GeminiAutomation(
                 user_agent=self.user_agent,
                 proxy=browser_proxy,

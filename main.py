@@ -533,6 +533,78 @@ else:
 _last_known_accounts_version: float | None = None
 
 
+async def cleanup_global_stats_task():
+    """后台任务：定期清理统计数据（每小时），防止内存泄漏"""
+    global global_stats
+    
+    while True:
+        try:
+            await asyncio.sleep(3600)  # 每小时执行一次
+            
+            async with stats_lock:
+                now = time.time()
+                cutoff_24h = 86400  # 24小时
+                
+                # 清理 24 小时前的请求时间戳
+                original_count = len(global_stats.get("request_timestamps", []))
+                global_stats["request_timestamps"] = [
+                    ts for ts in global_stats.get("request_timestamps", [])
+                    if now - ts < cutoff_24h
+                ]
+                cleaned_requests = original_count - len(global_stats["request_timestamps"])
+                
+                # 清理失败时间戳
+                global_stats["failure_timestamps"] = [
+                    ts for ts in global_stats.get("failure_timestamps", [])
+                    if now - ts < cutoff_24h
+                ]
+                
+                # 清理限流时间戳
+                global_stats["rate_limit_timestamps"] = [
+                    ts for ts in global_stats.get("rate_limit_timestamps", [])
+                    if now - ts < cutoff_24h
+                ]
+                
+                # 清理模型请求时间戳
+                model_timestamps = global_stats.get("model_request_timestamps", {})
+                for model in list(model_timestamps.keys()):
+                    model_timestamps[model] = [
+                        ts for ts in model_timestamps[model]
+                        if now - ts < cutoff_24h
+                    ]
+                    # 删除空列表
+                    if not model_timestamps[model]:
+                        del model_timestamps[model]
+                
+                # 清理访客 IP（24小时去重）
+                original_ips = len(global_stats.get("visitor_ips", {}))
+                global_stats["visitor_ips"] = {
+                    ip: ts for ip, ts in global_stats.get("visitor_ips", {}).items()
+                    if now - ts < cutoff_24h
+                }
+                cleaned_ips = original_ips - len(global_stats["visitor_ips"])
+                
+                # 限制 recent_conversations 为最近 60 条（双重保险）
+                if len(global_stats.get("recent_conversations", [])) > 60:
+                    global_stats["recent_conversations"] = global_stats["recent_conversations"][-60:]
+                
+                # 保存清理后的数据
+                await save_stats(global_stats)
+                
+                if cleaned_requests > 0 or cleaned_ips > 0:
+                    logger.info(
+                        f"[STATS-CLEANUP] 清理完成: {cleaned_requests} 个请求时间戳, "
+                        f"{cleaned_ips} 个访客IP"
+                    )
+                
+        except asyncio.CancelledError:
+            logger.info("[STATS-CLEANUP] 统计数据清理任务已停止")
+            break
+        except Exception as e:
+            logger.error(f"[STATS-CLEANUP] 清理任务异常: {type(e).__name__}: {str(e)[:100]}")
+            await asyncio.sleep(60)  # 出错后等待 60 秒再重试
+
+
 async def auto_refresh_accounts_task():
     """后台任务：定期检查数据库中的账号变化，自动刷新"""
     global multi_account_mgr, _last_known_accounts_version
@@ -621,6 +693,10 @@ async def startup_event():
     # 启动缓存清理任务
     asyncio.create_task(multi_account_mgr.start_background_cleanup())
     logger.info("[SYSTEM] 后台缓存清理任务已启动（间隔: 5分钟）")
+
+    # 启动统计数据清理任务（防止内存泄漏）
+    asyncio.create_task(cleanup_global_stats_task())
+    logger.info("[SYSTEM] 统计数据清理任务已启动（间隔: 1小时）")
 
     # 启动自动刷新账号任务（仅数据库模式有效）
     if os.environ.get("ACCOUNTS_CONFIG"):
@@ -896,6 +972,15 @@ async def admin_logout(request: Request):
     logout_user(request)
     logger.info("[AUTH] Admin logout")
     return {"success": True}
+
+@app.get("/health")
+async def health_check():
+    """公开的健康检查接口（无需认证）"""
+    return {
+        "status": "ok",
+        "time": datetime.utcnow().isoformat(),
+        "accounts": len(multi_account_mgr.accounts) if multi_account_mgr else 0
+    }
 
 @app.get("/admin/health")
 @require_login()

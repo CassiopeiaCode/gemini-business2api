@@ -6,7 +6,9 @@ import asyncio
 import json
 import logging
 import os
+import random
 import time
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, TYPE_CHECKING
@@ -26,6 +28,9 @@ if os.path.exists("/data"):
     ACCOUNTS_FILE = "/data/accounts.json"  # HF Pro 持久化
 else:
     ACCOUNTS_FILE = "data/accounts.json"  # 本地存储（统一到 data 目录）
+
+# 文件操作锁（防止并发读写导致文件句柄泄漏）
+_file_lock = threading.Lock()
 
 
 @dataclass
@@ -393,20 +398,11 @@ class MultiAccountManager:
             if not available_accounts:
                 raise HTTPException(503, "No available accounts")
 
-        # 按健康度排序（优先选择error_count最低的账户）
-        available_accounts.sort(key=lambda x: x[1], reverse=True)
+        # 从所有健康账户中随机选择
+        healthy_accounts = [acc_id for acc_id, _ in available_accounts]
 
-        # 只在更新索引时加锁（最小化锁持有时间）
-        async with self._index_lock:
-            if not hasattr(self, '_available_index'):
-                self._available_index = 0
-
-            # 在健康账户中轮询（只在前50%健康账户中选择）
-            healthy_count = max(1, len(available_accounts) // 2)
-            healthy_accounts = [acc_id for acc_id, _ in available_accounts[:healthy_count]]
-
-            account_id = healthy_accounts[self._available_index % len(healthy_accounts)]
-            self._available_index = (self._available_index + 1) % len(healthy_accounts)
+        # 随机选择一个健康账户
+        account_id = random.choice(healthy_accounts)
 
         account = self.accounts[account_id]
         logger.info(f"[MULTI] [ACCOUNT] {req_tag}选择账户: {account_id} (健康度: {account.error_count}错误)")
@@ -416,22 +412,47 @@ class MultiAccountManager:
 # ---------- 配置文件管理 ----------
 
 def _save_to_file(accounts_data: list):
-    """保存账户配置到本地文件"""
-    os.makedirs(os.path.dirname(ACCOUNTS_FILE) or ".", exist_ok=True)
-    with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(accounts_data, f, ensure_ascii=False, indent=2)
-    logger.info(f"[CONFIG] 配置已保存到 {ACCOUNTS_FILE}")
+    """保存账户配置到本地文件（线程安全）"""
+    with _file_lock:
+        try:
+            os.makedirs(os.path.dirname(ACCOUNTS_FILE) or ".", exist_ok=True)
+            # 使用临时文件 + 原子重命名，避免写入过程中的文件损坏
+            temp_file = ACCOUNTS_FILE + '.tmp'
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(accounts_data, f, ensure_ascii=False, indent=2)
+                f.flush()  # 确保数据写入磁盘
+                os.fsync(f.fileno())  # 强制同步到磁盘
+            
+            # 原子替换（Windows 需要先删除旧文件）
+            if os.path.exists(ACCOUNTS_FILE):
+                os.replace(temp_file, ACCOUNTS_FILE)
+            else:
+                os.rename(temp_file, ACCOUNTS_FILE)
+            
+            logger.info(f"[CONFIG] 配置已保存到 {ACCOUNTS_FILE}")
+        except Exception as e:
+            logger.error(f"[CONFIG] 保存配置失败: {e}")
+            # 清理临时文件
+            temp_file = ACCOUNTS_FILE + '.tmp'
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
+            raise
 
 
 def _load_from_file() -> list:
-    """从本地文件加载账户配置"""
-    if os.path.exists(ACCOUNTS_FILE):
-        try:
-            with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            logger.warning(f"[CONFIG] 文件加载失败: {str(e)}")
-    return None
+    """从本地文件加载账户配置（线程安全）"""
+    with _file_lock:
+        if os.path.exists(ACCOUNTS_FILE):
+            try:
+                with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                return data
+            except Exception as e:
+                logger.warning(f"[CONFIG] 文件加载失败: {str(e)}")
+        return None
 
 
 def save_accounts_to_file(accounts_data: list):

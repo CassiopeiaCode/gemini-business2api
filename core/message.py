@@ -151,4 +151,4 @@ def build_full_context_text(messages: List['Message']) -> str:
                 content_str += "[图片]" * image_count
 
         prompt += f"{role}: {content_str}\n\n"
-    return prompt
+    return prompt + "Assistant:"
