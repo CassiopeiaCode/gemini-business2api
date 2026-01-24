@@ -1507,6 +1507,7 @@ async def chat_impl(
     message_count = len(req.messages)
 
     monitor_recorded = False
+    account_manager = None  # 初始化为None，避免UnboundLocalError
 
     async def finalize_result(
         status: str,
@@ -1660,10 +1661,11 @@ async def chat_impl(
         preview = "[空消息]"
 
     # 记录请求基本信息
-    logger.info(f"[CHAT] [{account_manager.config.account_id}] [req_{request_id}] 收到请求: {req.model} | {len(req.messages)}条消息 | stream={req.stream}")
+    account_id = account_manager.config.account_id if account_manager else "unknown"
+    logger.info(f"[CHAT] [{account_id}] [req_{request_id}] 收到请求: {req.model} | {len(req.messages)}条消息 | stream={req.stream}")
 
     # 单独记录用户消息内容（方便查看）
-    logger.info(f"[CHAT] [{account_manager.config.account_id}] [req_{request_id}] 用户消息: {preview}")
+    logger.info(f"[CHAT] [{account_id}] [req_{request_id}] 用户消息: {preview}")
 
     # 3. 解析请求内容
     try:
