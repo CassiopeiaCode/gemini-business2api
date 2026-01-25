@@ -92,8 +92,14 @@ class GeminiAutomationFP:
             user_data_dir = getattr(page, 'user_data_dir', None)
             return self._run_flow(page, email, mail_client)
         except Exception as exc:
-            self._log("error", f"automation error: {exc}")
-            return {"success": False, "error": str(exc)}
+            error_msg = str(exc)
+            self._log("error", f"automation error: {error_msg}")
+            
+            # 检测浏览器连接错误，清理 DrissionPage 缓存目录
+            if "浏览器无法链接" in error_msg or "remote-debugging-port" in error_msg:
+                self._cleanup_drissionpage_cache()
+            
+            return {"success": False, "error": error_msg}
         finally:
             if page:
                 try:
@@ -559,6 +565,60 @@ class GeminiAutomationFP:
             import shutil
             if os.path.exists(user_data_dir):
                 shutil.rmtree(user_data_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+    def _cleanup_drissionpage_cache(self) -> None:
+        """清理 DrissionPage 缓存目录并 kill 所有浏览器进程（在浏览器连接失败时调用）"""
+        import shutil
+        import subprocess
+        import time
+        
+        # 1. 强制 kill 所有 Chrome/Chromium 进程（包括僵尸进程）
+        try:
+            self._log("warning", "killing all chrome/chromium processes")
+            # 使用多种方法确保彻底清理
+            subprocess.run(["pkill", "-9", "chrome"], stderr=subprocess.DEVNULL, check=False)
+            subprocess.run(["pkill", "-9", "chromium"], stderr=subprocess.DEVNULL, check=False)
+            subprocess.run(["killall", "-9", "chrome"], stderr=subprocess.DEVNULL, check=False)
+            subprocess.run(["killall", "-9", "chromium"], stderr=subprocess.DEVNULL, check=False)
+            # 等待进程完全终止
+            time.sleep(1)
+            self._log("info", "chrome/chromium processes killed")
+        except Exception as e:
+            self._log("warning", f"failed to kill chrome processes: {e}")
+        
+        # 2. Kill 所有 ChromeDriver 进程
+        try:
+            self._log("warning", "killing all chromedriver processes")
+            subprocess.run(["pkill", "-9", "chromedriver"], stderr=subprocess.DEVNULL, check=False)
+            subprocess.run(["killall", "-9", "chromedriver"], stderr=subprocess.DEVNULL, check=False)
+            time.sleep(0.5)
+            self._log("info", "chromedriver processes killed")
+        except Exception as e:
+            self._log("warning", f"failed to kill chromedriver processes: {e}")
+        
+        # 3. 清理 DrissionPage 缓存目录
+        try:
+            drissionpage_dir = "/tmp/DrissionPage"
+            if os.path.exists(drissionpage_dir):
+                self._log("warning", f"cleaning up DrissionPage cache: {drissionpage_dir}")
+                shutil.rmtree(drissionpage_dir, ignore_errors=True)
+                self._log("info", "DrissionPage cache cleaned successfully")
+        except Exception as e:
+            self._log("warning", f"failed to clean DrissionPage cache: {e}")
+        
+        # 4. 清理僵尸进程（通过重启父进程或等待系统回收）
+        try:
+            # 列出剩余的 chrome 进程用于诊断
+            result = subprocess.run(
+                ["pgrep", "-f", "chrome"],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if result.stdout.strip():
+                self._log("warning", f"remaining chrome processes: {result.stdout.strip()}")
         except Exception:
             pass
 
