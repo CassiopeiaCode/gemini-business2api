@@ -136,8 +136,10 @@ class RegisterService(BaseTaskService[RegisterTask]):
                 return {"success": False, "error": "duckmail register failed"}
             mail_provider_name = "duckmail"
 
-        # 浏览器代理：优先使用 browser_proxy；为空则回退到 proxy（兼容旧配置）
-        browser_proxy = (config.basic.browser_proxy or "").strip() or (config.basic.proxy or "").strip()
+        # 浏览器代理：支持逗号分隔多个代理，启动时随机选择一个
+        from core.proxy_helper import choose_random_proxy
+        browser_proxy_raw = (config.basic.browser_proxy or "").strip() or (config.basic.proxy or "").strip()
+        browser_proxy = choose_random_proxy(browser_proxy_raw) or browser_proxy_raw
 
         # 根据配置选择浏览器引擎
         browser_engine = (config.basic.browser_engine or "dp").lower()
