@@ -45,3 +45,33 @@ def verify_api_key(api_key_value: str, authorization: Optional[str] = None) -> b
         )
 
     return True
+
+
+def verify_gemini_api_key(
+    expected_key: str,
+    key_param: Optional[str] = None,
+    header_key: Optional[str] = None,
+) -> bool:
+    """
+    验证 Gemini 格式的 API 密钥
+
+    优先级: x-goog-api-key header > key query parameter
+    """
+    if not expected_key:
+        return True
+
+    actual_key = header_key or key_param
+
+    if not actual_key:
+        raise HTTPException(
+            status_code=401,
+            detail="API key required. Provide via 'key' parameter or 'x-goog-api-key' header.",
+        )
+
+    if actual_key != expected_key:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid API key.",
+        )
+
+    return True

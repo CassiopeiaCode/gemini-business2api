@@ -38,8 +38,18 @@ IMAGE_DIR = os.path.join(DATA_DIR, "images")
 os.makedirs(IMAGE_DIR, exist_ok=True)
 
 # 导入认证模块
-from core.auth import verify_api_key
+from core.auth import verify_api_key, verify_gemini_api_key
 from core.session_auth import is_logged_in, login_user, logout_user, require_login, generate_session_secret
+
+# 导入 Gemini 格式转换器
+from core.gemini_format import (
+    GeminiRequest,
+    GeminiRequestConverter,
+    GeminiResponseConverter,
+    GeminiErrorConverter,
+    parse_markdown_image,
+    download_image_as_base64,
+)
 
 # 导入核心模块
 from core.message import (
@@ -1490,8 +1500,509 @@ async def chat(
 ):
     # API Key 验证
     verify_api_key(API_KEY, authorization)
-    # ... (保留原有的chat逻辑)
     return await chat_impl(req, request, authorization)
+
+
+# ---------- Gemini 原生格式 API 端点 ----------
+
+@app.post("/v1beta/models/{model}:streamGenerateContent")
+async def gemini_stream_generate(
+    model: str,
+    request: Request,
+    key: Optional[str] = None,
+    alt: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    x_goog_api_key: Optional[str] = Header(None, alias="x-goog-api-key"),
+):
+    use_sse = (alt == "sse")
+    # Gemini 客户端通常是“每次请求携带完整 history”的无状态模式。
+    # 为避免“新对话复用旧 Session”，这里默认按 conversation_id 隔离；未提供则按请求生成一次性 id。
+    request.state.conversation_id = conversation_id or f"gemini_req_{uuid.uuid4().hex}"
+
+    try:
+        verify_gemini_api_key(API_KEY, key_param=key, header_key=x_goog_api_key)
+    except HTTPException as e:
+        error_response = GeminiErrorConverter.create_error_response(
+            status_code=e.status_code,
+            message=str(e.detail),
+        )
+        raise HTTPException(status_code=e.status_code, detail=error_response)
+
+    try:
+        body = await request.json()
+        gemini_req = GeminiRequest(**body)
+    except json.JSONDecodeError as e:
+        error_response = GeminiErrorConverter.create_error_response(
+            status_code=400,
+            message=f"Invalid JSON in request body: {str(e)}",
+        )
+        raise HTTPException(status_code=400, detail=error_response)
+    except Exception as e:
+        error_response = GeminiErrorConverter.create_error_response(
+            status_code=400,
+            message=f"Invalid request format: {str(e)}",
+        )
+        raise HTTPException(status_code=400, detail=error_response)
+
+    internal_req = GeminiRequestConverter.to_internal_format(gemini_req, model)
+    internal_req["stream"] = True
+    chat_request = ChatRequest(**internal_req)
+    converter = GeminiResponseConverter(model)
+
+    def format_chunk(gemini_chunk: dict, is_first: bool = False) -> str:
+        if use_sse:
+            return f"data: {json.dumps(gemini_chunk, ensure_ascii=False)}\n\n"
+        chunk_json = json.dumps(gemini_chunk, ensure_ascii=False)
+        if is_first:
+            return f"[{chunk_json}\n"
+        return f",{chunk_json}\n"
+
+    async def gemini_stream_wrapper():
+        is_first_chunk = True
+        has_output = False
+
+        try:
+            response = await chat_impl(chat_request, request, None)
+
+            if isinstance(response, StreamingResponse):
+                async for chunk_bytes in response.body_iterator:
+                    chunk_str = chunk_bytes.decode("utf-8") if isinstance(chunk_bytes, (bytes, bytearray)) else str(chunk_bytes)
+
+                    for line in chunk_str.split("\n"):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if line == "data: [DONE]":
+                            continue
+                        if not line.startswith("data: "):
+                            continue
+
+                        try:
+                            data = json.loads(line[6:])
+                        except json.JSONDecodeError:
+                            continue
+
+                        if "error" in data:
+                            error_chunk = GeminiErrorConverter.create_error_response(
+                                status_code=500,
+                                message=(data.get("error") or {}).get("message", "Unknown error"),
+                            )
+                            yield format_chunk(error_chunk, is_first_chunk)
+                            is_first_chunk = False
+                            has_output = True
+                            continue
+
+                        choices = data.get("choices", [])
+                        if not choices:
+                            continue
+
+                        delta = choices[0].get("delta", {}) or {}
+                        finish_reason = choices[0].get("finish_reason")
+
+                        if "reasoning_content" in delta:
+                            text = delta["reasoning_content"]
+                            clean_text, images = parse_markdown_image(text)
+
+                            if clean_text:
+                                gemini_chunk = converter.create_stream_chunk(text=clean_text, is_thought=True)
+                                yield format_chunk(gemini_chunk, is_first_chunk)
+                                is_first_chunk = False
+                                has_output = True
+
+                            for img in images:
+                                if img.get("data"):
+                                    gemini_chunk = converter.create_stream_chunk(
+                                        inline_data={"mimeType": img["mimeType"], "data": img["data"]},
+                                        is_thought=True,
+                                    )
+                                    yield format_chunk(gemini_chunk, is_first_chunk)
+                                    is_first_chunk = False
+                                    has_output = True
+                                elif img.get("url"):
+                                    try:
+                                        mime_type, base64_data = await download_image_as_base64(img["url"])
+                                        gemini_chunk = converter.create_stream_chunk(
+                                            inline_data={"mimeType": mime_type, "data": base64_data},
+                                            is_thought=True,
+                                        )
+                                        yield format_chunk(gemini_chunk, is_first_chunk)
+                                        is_first_chunk = False
+                                        has_output = True
+                                    except Exception as err:
+                                        logger.warning(f"[GEMINI] 图片下载失败: {err}")
+                                        gemini_chunk = converter.create_stream_chunk(
+                                            text=f"[图片加载失败: {img['url']}]",
+                                            is_thought=True,
+                                        )
+                                        yield format_chunk(gemini_chunk, is_first_chunk)
+                                        is_first_chunk = False
+                                        has_output = True
+
+                        if "content" in delta:
+                            text = delta["content"]
+                            clean_text, images = parse_markdown_image(text)
+
+                            if clean_text:
+                                gemini_chunk = converter.create_stream_chunk(text=clean_text, is_thought=False)
+                                yield format_chunk(gemini_chunk, is_first_chunk)
+                                is_first_chunk = False
+                                has_output = True
+
+                            for idx, img in enumerate(images):
+                                is_last_image = (idx == len(images) - 1)
+                                thought_sig = "" if is_last_image else None
+
+                                if img.get("data"):
+                                    gemini_chunk = converter.create_stream_chunk(
+                                        inline_data={"mimeType": img["mimeType"], "data": img["data"]},
+                                        is_thought=False,
+                                        thought_signature=thought_sig,
+                                    )
+                                    yield format_chunk(gemini_chunk, is_first_chunk)
+                                    is_first_chunk = False
+                                    has_output = True
+                                elif img.get("url"):
+                                    try:
+                                        mime_type, base64_data = await download_image_as_base64(img["url"])
+                                        gemini_chunk = converter.create_stream_chunk(
+                                            inline_data={"mimeType": mime_type, "data": base64_data},
+                                            is_thought=False,
+                                            thought_signature=thought_sig,
+                                        )
+                                        yield format_chunk(gemini_chunk, is_first_chunk)
+                                        is_first_chunk = False
+                                        has_output = True
+                                    except Exception as err:
+                                        logger.warning(f"[GEMINI] 图片下载失败: {err}")
+                                        gemini_chunk = converter.create_stream_chunk(
+                                            text=f"[图片加载失败: {img['url']}]",
+                                            is_thought=False,
+                                        )
+                                        yield format_chunk(gemini_chunk, is_first_chunk)
+                                        is_first_chunk = False
+                                        has_output = True
+
+                        if finish_reason == "stop":
+                            final_chunk = converter.create_stream_chunk(
+                                text="",
+                                finish_reason="STOP",
+                                thought_signature="",
+                            )
+                            yield format_chunk(final_chunk, is_first_chunk)
+                            is_first_chunk = False
+                            has_output = True
+            else:
+                if isinstance(response, dict):
+                    choices = response.get("choices", [])
+                    if choices:
+                        message = choices[0].get("message", {}) or {}
+                        reasoning = message.get("reasoning_content", "") or ""
+                        content = message.get("content", "") or ""
+
+                        if reasoning:
+                            clean_text, images = parse_markdown_image(reasoning)
+                            if clean_text:
+                                gemini_chunk = converter.create_stream_chunk(text=clean_text, is_thought=True)
+                                yield format_chunk(gemini_chunk, is_first_chunk)
+                                is_first_chunk = False
+                                has_output = True
+                            for img in images:
+                                if img.get("data"):
+                                    gemini_chunk = converter.create_stream_chunk(
+                                        inline_data={"mimeType": img["mimeType"], "data": img["data"]},
+                                        is_thought=True,
+                                    )
+                                    yield format_chunk(gemini_chunk, is_first_chunk)
+                                    is_first_chunk = False
+                                    has_output = True
+                                elif img.get("url"):
+                                    try:
+                                        mime_type, base64_data = await download_image_as_base64(img["url"])
+                                        gemini_chunk = converter.create_stream_chunk(
+                                            inline_data={"mimeType": mime_type, "data": base64_data},
+                                            is_thought=True,
+                                        )
+                                        yield format_chunk(gemini_chunk, is_first_chunk)
+                                        is_first_chunk = False
+                                        has_output = True
+                                    except Exception as err:
+                                        logger.warning(f"[GEMINI] 图片下载失败: {err}")
+
+                        if content:
+                            clean_text, images = parse_markdown_image(content)
+                            if clean_text:
+                                gemini_chunk = converter.create_stream_chunk(text=clean_text, is_thought=False)
+                                yield format_chunk(gemini_chunk, is_first_chunk)
+                                is_first_chunk = False
+                                has_output = True
+                            for idx, img in enumerate(images):
+                                is_last_image = (idx == len(images) - 1)
+                                thought_sig = "" if is_last_image else None
+                                if img.get("data"):
+                                    gemini_chunk = converter.create_stream_chunk(
+                                        inline_data={"mimeType": img["mimeType"], "data": img["data"]},
+                                        is_thought=False,
+                                        thought_signature=thought_sig,
+                                    )
+                                    yield format_chunk(gemini_chunk, is_first_chunk)
+                                    is_first_chunk = False
+                                    has_output = True
+                                elif img.get("url"):
+                                    try:
+                                        mime_type, base64_data = await download_image_as_base64(img["url"])
+                                        gemini_chunk = converter.create_stream_chunk(
+                                            inline_data={"mimeType": mime_type, "data": base64_data},
+                                            is_thought=False,
+                                            thought_signature=thought_sig,
+                                        )
+                                        yield format_chunk(gemini_chunk, is_first_chunk)
+                                        is_first_chunk = False
+                                        has_output = True
+                                    except Exception as err:
+                                        logger.warning(f"[GEMINI] 图片下载失败: {err}")
+
+                        final_chunk = converter.create_stream_chunk(text="", finish_reason="STOP")
+                        yield format_chunk(final_chunk, is_first_chunk)
+                        is_first_chunk = False
+                        has_output = True
+
+            if (not use_sse) and has_output:
+                yield "]"
+
+        except HTTPException as e:
+            error_chunk = GeminiErrorConverter.create_error_response(
+                status_code=e.status_code,
+                message=str(e.detail) if isinstance(e.detail, str) else json.dumps(e.detail),
+            )
+            if use_sse:
+                yield f"data: {json.dumps(error_chunk, ensure_ascii=False)}\n\n"
+            else:
+                if is_first_chunk:
+                    yield f"[{json.dumps(error_chunk, ensure_ascii=False)}]"
+                else:
+                    yield f",{json.dumps(error_chunk, ensure_ascii=False)}]"
+        except (asyncio.TimeoutError, httpx.TimeoutException) as e:
+            error_chunk = GeminiErrorConverter.create_error_response(
+                status_code=504,
+                message=f"Request timeout: {type(e).__name__}",
+            )
+            if use_sse:
+                yield f"data: {json.dumps(error_chunk, ensure_ascii=False)}\n\n"
+            else:
+                if is_first_chunk:
+                    yield f"[{json.dumps(error_chunk, ensure_ascii=False)}]"
+                else:
+                    yield f",{json.dumps(error_chunk, ensure_ascii=False)}]"
+        except Exception as e:
+            error_chunk = GeminiErrorConverter.create_error_response(
+                status_code=500,
+                message=f"Internal error: {type(e).__name__}: {str(e)[:200]}",
+            )
+            if use_sse:
+                yield f"data: {json.dumps(error_chunk, ensure_ascii=False)}\n\n"
+            else:
+                if is_first_chunk:
+                    yield f"[{json.dumps(error_chunk, ensure_ascii=False)}]"
+                else:
+                    yield f",{json.dumps(error_chunk, ensure_ascii=False)}]"
+
+    media_type = "text/event-stream" if use_sse else "application/json"
+    return StreamingResponse(gemini_stream_wrapper(), media_type=media_type)
+
+
+@app.post("/v1beta/models/{model}:generateContent")
+async def gemini_generate(
+    model: str,
+    request: Request,
+    key: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    x_goog_api_key: Optional[str] = Header(None, alias="x-goog-api-key"),
+):
+    # 同 streamGenerateContent：默认按请求隔离，避免新对话粘连旧 session
+    request.state.conversation_id = conversation_id or f"gemini_req_{uuid.uuid4().hex}"
+    try:
+        verify_gemini_api_key(API_KEY, key_param=key, header_key=x_goog_api_key)
+    except HTTPException as e:
+        error_response = GeminiErrorConverter.create_error_response(
+            status_code=e.status_code,
+            message=str(e.detail),
+        )
+        raise HTTPException(status_code=e.status_code, detail=error_response)
+
+    try:
+        body = await request.json()
+        gemini_req = GeminiRequest(**body)
+    except json.JSONDecodeError as e:
+        error_response = GeminiErrorConverter.create_error_response(
+            status_code=400,
+            message=f"Invalid JSON in request body: {str(e)}",
+        )
+        raise HTTPException(status_code=400, detail=error_response)
+    except Exception as e:
+        error_response = GeminiErrorConverter.create_error_response(
+            status_code=400,
+            message=f"Invalid request format: {str(e)}",
+        )
+        raise HTTPException(status_code=400, detail=error_response)
+
+    internal_req = GeminiRequestConverter.to_internal_format(gemini_req, model)
+    internal_req["stream"] = False
+    chat_request = ChatRequest(**internal_req)
+    converter = GeminiResponseConverter(model)
+
+    try:
+        response = await chat_impl(chat_request, request, None)
+
+        if isinstance(response, StreamingResponse):
+            reasoning_text = ""
+            content_text = ""
+
+            async for chunk_bytes in response.body_iterator:
+                chunk_str = chunk_bytes.decode("utf-8") if isinstance(chunk_bytes, (bytes, bytearray)) else str(chunk_bytes)
+                for line in chunk_str.split("\n"):
+                    line = line.strip()
+                    if not line or line == "data: [DONE]":
+                        continue
+                    if not line.startswith("data: "):
+                        continue
+                    try:
+                        data = json.loads(line[6:])
+                    except json.JSONDecodeError:
+                        continue
+                    choices = data.get("choices", [])
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta", {}) or {}
+                    if "reasoning_content" in delta:
+                        reasoning_text += delta["reasoning_content"]
+                    if "content" in delta:
+                        content_text += delta["content"]
+
+            content_parts: List[Dict[str, Any]] = []
+
+            if reasoning_text:
+                clean_text, images = parse_markdown_image(reasoning_text)
+                if clean_text:
+                    content_parts.append({"text": clean_text, "thought": True})
+                for img in images:
+                    if img.get("data"):
+                        content_parts.append({"inlineData": {"mimeType": img["mimeType"], "data": img["data"]}, "thought": True})
+                    elif img.get("url"):
+                        try:
+                            mime_type, base64_data = await download_image_as_base64(img["url"])
+                            content_parts.append({"inlineData": {"mimeType": mime_type, "data": base64_data}, "thought": True})
+                        except Exception as err:
+                            logger.warning(f"[GEMINI] 图片下载失败: {err}")
+
+            if content_text:
+                clean_text, images = parse_markdown_image(content_text)
+                if clean_text:
+                    content_parts.append({"text": clean_text})
+                for idx, img in enumerate(images):
+                    is_last_image = (idx == len(images) - 1)
+                    part: Dict[str, Any]
+                    if img.get("data"):
+                        part = {"inlineData": {"mimeType": img["mimeType"], "data": img["data"]}}
+                    elif img.get("url"):
+                        try:
+                            mime_type, base64_data = await download_image_as_base64(img["url"])
+                            part = {"inlineData": {"mimeType": mime_type, "data": base64_data}}
+                        except Exception as err:
+                            logger.warning(f"[GEMINI] 图片下载失败: {err}")
+                            continue
+                    else:
+                        continue
+
+                    if is_last_image:
+                        part["thoughtSignature"] = ""
+                    content_parts.append(part)
+
+            if not content_parts:
+                content_parts.append({"text": ""})
+
+            return converter.create_non_stream_response(content_parts)
+
+        if isinstance(response, dict):
+            content_parts = []
+            choices = response.get("choices", [])
+            if choices:
+                message = choices[0].get("message", {}) or {}
+                reasoning = message.get("reasoning_content", "") or ""
+                content = message.get("content", "") or ""
+
+                if reasoning:
+                    clean_text, images = parse_markdown_image(reasoning)
+                    if clean_text:
+                        content_parts.append({"text": clean_text, "thought": True})
+                    for img in images:
+                        if img.get("data"):
+                            content_parts.append({"inlineData": {"mimeType": img["mimeType"], "data": img["data"]}, "thought": True})
+                        elif img.get("url"):
+                            try:
+                                mime_type, base64_data = await download_image_as_base64(img["url"])
+                                content_parts.append({"inlineData": {"mimeType": mime_type, "data": base64_data}, "thought": True})
+                            except Exception as err:
+                                logger.warning(f"[GEMINI] 图片下载失败: {err}")
+
+                if content:
+                    clean_text, images = parse_markdown_image(content)
+                    if clean_text:
+                        content_parts.append({"text": clean_text})
+                    for idx, img in enumerate(images):
+                        is_last_image = (idx == len(images) - 1)
+                        part: Dict[str, Any]
+                        if img.get("data"):
+                            part = {"inlineData": {"mimeType": img["mimeType"], "data": img["data"]}}
+                        elif img.get("url"):
+                            try:
+                                mime_type, base64_data = await download_image_as_base64(img["url"])
+                                part = {"inlineData": {"mimeType": mime_type, "data": base64_data}}
+                            except Exception as err:
+                                logger.warning(f"[GEMINI] 图片下载失败: {err}")
+                                continue
+                        else:
+                            continue
+                        if is_last_image:
+                            part["thoughtSignature"] = ""
+                        content_parts.append(part)
+
+            if not content_parts:
+                content_parts.append({"text": ""})
+
+            usage = response.get("usage", {})
+            if usage:
+                converter.set_prompt_tokens(usage.get("prompt_tokens", 0))
+                converter.set_candidates_tokens(usage.get("completion_tokens", 0))
+
+            return converter.create_non_stream_response(content_parts)
+
+        error_response = GeminiErrorConverter.create_error_response(
+            status_code=500,
+            message="Unexpected response type from internal API",
+        )
+        raise HTTPException(status_code=500, detail=error_response)
+
+    except HTTPException as e:
+        if isinstance(e.detail, dict) and "error" in e.detail:
+            raise
+        error_response = GeminiErrorConverter.create_error_response(
+            status_code=e.status_code,
+            message=str(e.detail) if isinstance(e.detail, str) else json.dumps(e.detail),
+        )
+        raise HTTPException(status_code=e.status_code, detail=error_response)
+    except (asyncio.TimeoutError, httpx.TimeoutException) as e:
+        error_response = GeminiErrorConverter.create_error_response(
+            status_code=504,
+            message=f"Request timeout: {type(e).__name__}",
+        )
+        raise HTTPException(status_code=504, detail=error_response)
+    except Exception as e:
+        error_response = GeminiErrorConverter.create_error_response(
+            status_code=500,
+            message=f"Internal error: {type(e).__name__}: {str(e)[:200]}",
+        )
+        raise HTTPException(status_code=500, detail=error_response)
+
 
 # chat实现函数
 async def chat_impl(
@@ -1565,6 +2076,11 @@ async def chat_impl(
         client_ip = client_ip.split(",")[0].strip()
     else:
         client_ip = request.client.host if request.client else "unknown"
+
+    # 可选的会话隔离 id（Gemini 端点会写入；也可由反代/客户端注入）
+    conversation_id = getattr(request.state, "conversation_id", None)
+    if conversation_id:
+        client_ip = f"{client_ip}|{conversation_id}"
 
     # 记录请求统计
     async with stats_lock:
