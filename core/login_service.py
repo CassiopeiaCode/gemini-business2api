@@ -295,41 +295,55 @@ class LoginService(BaseTaskService[LoginTask]):
                 if os.environ.get("ACCOUNTS_CONFIG"):
                     continue
 
-                # 计算不可用账户占比
+                # 自愈触发条件：可用账号数 < 30 且没有注册任务在运行
+                # 候选账号：未手动禁用 且 未过期
                 candidates = [
                     acc for acc in self.multi_account_mgr.accounts.values()
                     if (not acc.config.disabled) and (not acc.config.is_expired())
                 ]
                 total = len(candidates)
-                
+
                 if total == 0:
-                    logger.warning("[HEAL] no available accounts in pool")
-                    continue
-
-                unavailable = sum(1 for acc in candidates if not acc.should_retry())
-                ratio = unavailable / total
-
-                logger.info(
-                    "[HEAL] account pool status: %s/%s unavailable (%.1f%%)",
-                    unavailable,
-                    total,
-                    ratio * 100.0,
-                )
-
-                # 触发自愈：占比 > 60% 且没有注册任务在运行
-                if ratio > 0.60:
                     current_task = self.register_service.get_current_task()
                     is_running = bool(current_task and current_task.status == TaskStatus.RUNNING)
-                    
+
+                    if is_running:
+                        logger.info("[HEAL] register task already running, skipping auto-heal (no candidates in pool)")
+                        continue
+
+                    logger.warning("[HEAL] no candidate accounts in pool (all disabled/expired or empty); triggering auto-heal register")
+                    try:
+                        await self.register_service.start_register(count=30)
+                        logger.info("[HEAL] auto-heal register task started successfully (pool empty)")
+                    except Exception as exc:
+                        logger.error("[HEAL] failed to start register task (pool empty): %s", exc, exc_info=True)
+                    continue
+
+                available = sum(1 for acc in candidates if acc.should_retry())
+                unavailable = total - available
+
+                logger.info(
+                    "[HEAL] account pool status: %s/%s available, %s/%s unavailable",
+                    available,
+                    total,
+                    unavailable,
+                    total,
+                )
+
+                if available < 30:
+                    current_task = self.register_service.get_current_task()
+                    is_running = bool(current_task and current_task.status == TaskStatus.RUNNING)
+
                     if is_running:
                         logger.info("[HEAL] register task already running, skipping auto-heal")
                     else:
                         logger.warning(
-                            "[HEAL] triggering auto-heal: unavailable ratio too high (%.0f%%), registering 10 new accounts",
-                            ratio * 100.0,
+                            "[HEAL] triggering auto-heal: available accounts too low (%s/%s), registering 30 new accounts",
+                            available,
+                            total,
                         )
                         try:
-                            await self.register_service.start_register(count=10)
+                            await self.register_service.start_register(count=30)
                             logger.info("[HEAL] auto-heal register task started successfully")
                         except Exception as exc:
                             logger.error("[HEAL] failed to start register task: %s", exc, exc_info=True)
@@ -399,8 +413,8 @@ class LoginService(BaseTaskService[LoginTask]):
                     continue
 
                 # 判断处理策略
-                if remaining_hours < -1:
-                    # 已过期超过1小时：删除
+                if remaining_hours < 0:
+                    # 已过期：立即删除（不再保留宽限期）
                     logger.warning(
                         "[LOGIN] account %s expired %.1f hours ago, marking for deletion",
                         account_id,
@@ -408,19 +422,12 @@ class LoginService(BaseTaskService[LoginTask]):
                     )
                     accounts_to_delete.append(account_id)
                 elif remaining_hours <= config.basic.refresh_window_hours:
-                    # 即将过期或刚过期不到1小时：刷新
-                    if remaining_hours < 0:
-                        logger.info(
-                            "[LOGIN] account %s expired %.1f hours ago (within grace period), marking for refresh",
-                            account_id,
-                            abs(remaining_hours),
-                        )
-                    else:
-                        logger.info(
-                            "[LOGIN] account %s will expire in %.1f hours, marking for refresh",
-                            account_id,
-                            remaining_hours,
-                        )
+                    # 未过期但即将过期：刷新
+                    logger.info(
+                        "[LOGIN] account %s will expire in %.1f hours, marking for refresh",
+                        account_id,
+                        remaining_hours,
+                    )
                     accounts_to_refresh.append(account_id)
 
             # 删除已过期账户

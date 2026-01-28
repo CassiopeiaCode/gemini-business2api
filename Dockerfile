@@ -28,6 +28,7 @@ RUN apt-get update && \
         chromium chromium-driver \
         dbus dbus-x11 \
         xvfb xauth \
+        procps psmisc \
         libglib2.0-0 libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
         libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 \
         libxfixes3 libxrandr2 libgbm1 libasound2 libpango-1.0-0 \
@@ -37,11 +38,6 @@ RUN apt-get update && \
     apt-get purge -y gcc && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-
-# 复制后端代码
-COPY main.py .
-COPY core ./core
-COPY util ./util
 
 # 下载并解压 fingerprint-chromium 浏览器
 RUN apt-get update && \
@@ -55,6 +51,11 @@ RUN apt-get update && \
     apt-get purge -y xz-utils && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
+
+# 复制后端代码
+COPY main.py .
+COPY core ./core
+COPY util ./util
 
 # 从 builder 阶段只复制构建好的静态文件
 COPY --from=frontend-builder /app/static ./static
