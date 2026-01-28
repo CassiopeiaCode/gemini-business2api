@@ -282,22 +282,19 @@ class LoginService(BaseTaskService[LoginTask]):
             return
 
         logger.info("[HEAL] account pool health monitor started")
-        
-        # 使用与 login_refresh_polling_seconds 相同的间隔
+
+        # 固定每10分钟检查一次（独立于 login_refresh_polling_seconds）
+        check_interval_seconds = 600
+        # 自愈触发条件：活跃/可用账号数 < 100 且没有注册任务在运行
+        target_min_available = 100
+
         while self._is_polling:
             try:
-                # 获取当前轮询间隔
-                polling_seconds = int(getattr(config.retry, "login_refresh_polling_seconds", 1800) or 0)
-                if polling_seconds <= 0:
-                    logger.info("[HEAL] polling disabled, stopping health monitor")
-                    break
-
-                await asyncio.sleep(polling_seconds)
+                await asyncio.sleep(check_interval_seconds)
 
                 if os.environ.get("ACCOUNTS_CONFIG"):
                     continue
 
-                # 自愈触发条件：可用账号数 < 30 且没有注册任务在运行
                 # 候选账号：未手动禁用 且 未过期
                 candidates = [
                     acc for acc in self.multi_account_mgr.accounts.values()
@@ -305,17 +302,19 @@ class LoginService(BaseTaskService[LoginTask]):
                 ]
                 total = len(candidates)
 
-                if total == 0:
-                    current_task = self.register_service.get_current_task()
-                    is_running = bool(current_task and current_task.status == TaskStatus.RUNNING)
+                current_task = self.register_service.get_current_task()
+                is_running = bool(current_task and current_task.status == TaskStatus.RUNNING)
 
+                if total == 0:
                     if is_running:
                         logger.info("[HEAL] register task already running, skipping auto-heal (no candidates in pool)")
                         continue
 
-                    logger.warning("[HEAL] no candidate accounts in pool (all disabled/expired or empty); triggering auto-heal register")
+                    logger.warning(
+                        "[HEAL] no candidate accounts in pool (all disabled/expired or empty); triggering auto-heal register"
+                    )
                     try:
-                        await self.register_service.start_register(count=30)
+                        await self.register_service.start_register(count=target_min_available)
                         logger.info("[HEAL] auto-heal register task started successfully (pool empty)")
                     except Exception as exc:
                         logger.error("[HEAL] failed to start register task (pool empty): %s", exc, exc_info=True)
@@ -332,23 +331,23 @@ class LoginService(BaseTaskService[LoginTask]):
                     total,
                 )
 
-                if available < 30:
-                    current_task = self.register_service.get_current_task()
-                    is_running = bool(current_task and current_task.status == TaskStatus.RUNNING)
-
+                if available < target_min_available:
                     if is_running:
                         logger.info("[HEAL] register task already running, skipping auto-heal")
-                    else:
-                        logger.warning(
-                            "[HEAL] triggering auto-heal: available accounts too low (%s/%s), registering 30 new accounts",
-                            available,
-                            total,
-                        )
-                        try:
-                            await self.register_service.start_register(count=30)
-                            logger.info("[HEAL] auto-heal register task started successfully")
-                        except Exception as exc:
-                            logger.error("[HEAL] failed to start register task: %s", exc, exc_info=True)
+                        continue
+
+                    register_count = max(1, target_min_available - available)
+                    logger.warning(
+                        "[HEAL] triggering auto-heal: available accounts too low (%s/%s), registering %s new accounts",
+                        available,
+                        total,
+                        register_count,
+                    )
+                    try:
+                        await self.register_service.start_register(count=register_count)
+                        logger.info("[HEAL] auto-heal register task started successfully")
+                    except Exception as exc:
+                        logger.error("[HEAL] failed to start register task: %s", exc, exc_info=True)
 
             except asyncio.CancelledError:
                 logger.info("[HEAL] health monitor stopped")
