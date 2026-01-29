@@ -47,7 +47,7 @@ class GeminiContent(BaseModel):
         parts: 消息内容部分列表
     """
 
-    role: str  # "user" 或 "model"
+    role: str = "user"  # "user" 或 "model"；兼容缺省 role 的客户端
     parts: List[GeminiPart]
 
 

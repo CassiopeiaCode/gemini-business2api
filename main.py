@@ -485,6 +485,17 @@ async def serve_frontend_index():
         return FileResponse(index_path)
     raise HTTPException(404, "Not Found")
 
+
+# ---------- Gemini 错误响应兼容处理 ----------
+# Gemini 原生 API 客户端通常期待顶层为 {"error": {...}}。
+# FastAPI 默认会把 HTTPException.detail 包装成 {"detail": ...}，
+# 这会导致部分客户端将响应体视为“无效/空”，进而触发 0 秒重试。
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    if request.url.path.startswith("/v1beta/") and isinstance(exc.detail, dict) and "error" in exc.detail:
+        return JSONResponse(status_code=exc.status_code, content=exc.detail)
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
 @app.get("/logo.svg")
 async def serve_logo():
     logo_path = os.path.join("static", "logo.svg")
@@ -1526,7 +1537,7 @@ async def gemini_stream_generate(
             status_code=e.status_code,
             message=str(e.detail),
         )
-        raise HTTPException(status_code=e.status_code, detail=error_response)
+        return JSONResponse(status_code=e.status_code, content=error_response)
 
     try:
         body = await request.json()
@@ -1536,13 +1547,13 @@ async def gemini_stream_generate(
             status_code=400,
             message=f"Invalid JSON in request body: {str(e)}",
         )
-        raise HTTPException(status_code=400, detail=error_response)
+        return JSONResponse(status_code=400, content=error_response)
     except Exception as e:
         error_response = GeminiErrorConverter.create_error_response(
             status_code=400,
             message=f"Invalid request format: {str(e)}",
         )
-        raise HTTPException(status_code=400, detail=error_response)
+        return JSONResponse(status_code=400, content=error_response)
 
     internal_req = GeminiRequestConverter.to_internal_format(gemini_req, model)
     internal_req["stream"] = True
@@ -1827,7 +1838,7 @@ async def gemini_generate(
             status_code=e.status_code,
             message=str(e.detail),
         )
-        raise HTTPException(status_code=e.status_code, detail=error_response)
+        return JSONResponse(status_code=e.status_code, content=error_response)
 
     try:
         body = await request.json()
@@ -1837,13 +1848,13 @@ async def gemini_generate(
             status_code=400,
             message=f"Invalid JSON in request body: {str(e)}",
         )
-        raise HTTPException(status_code=400, detail=error_response)
+        return JSONResponse(status_code=400, content=error_response)
     except Exception as e:
         error_response = GeminiErrorConverter.create_error_response(
             status_code=400,
             message=f"Invalid request format: {str(e)}",
         )
-        raise HTTPException(status_code=400, detail=error_response)
+        return JSONResponse(status_code=400, content=error_response)
 
     internal_req = GeminiRequestConverter.to_internal_format(gemini_req, model)
     internal_req["stream"] = False
@@ -1984,24 +1995,24 @@ async def gemini_generate(
 
     except HTTPException as e:
         if isinstance(e.detail, dict) and "error" in e.detail:
-            raise
+            return JSONResponse(status_code=e.status_code, content=e.detail)
         error_response = GeminiErrorConverter.create_error_response(
             status_code=e.status_code,
             message=str(e.detail) if isinstance(e.detail, str) else json.dumps(e.detail),
         )
-        raise HTTPException(status_code=e.status_code, detail=error_response)
+        return JSONResponse(status_code=e.status_code, content=error_response)
     except (asyncio.TimeoutError, httpx.TimeoutException) as e:
         error_response = GeminiErrorConverter.create_error_response(
             status_code=504,
             message=f"Request timeout: {type(e).__name__}",
         )
-        raise HTTPException(status_code=504, detail=error_response)
+        return JSONResponse(status_code=504, content=error_response)
     except Exception as e:
         error_response = GeminiErrorConverter.create_error_response(
             status_code=500,
             message=f"Internal error: {type(e).__name__}: {str(e)[:200]}",
         )
-        raise HTTPException(status_code=500, detail=error_response)
+        return JSONResponse(status_code=500, content=error_response)
 
 
 # chat实现函数
