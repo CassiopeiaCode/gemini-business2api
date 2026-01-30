@@ -1,14 +1,38 @@
 #!/bin/bash
 set -e
 
-# 启动 Xvfb 在后台
+# ========== 启动 Xvfb ==========
 Xvfb :99 -screen 0 1280x800x24 -ac &
-
-# 等待 Xvfb 启动
 sleep 1
-
-# 设置 DISPLAY 环境变量
 export DISPLAY=:99
 
-# 启动 Python 应用（使用 nice 19 降低优先级）
-exec nice -n 19 python -u main.py
+# ========== 启动 Python 应用 ==========
+nice -n 19 python -u main.py &
+APP_PID=$!
+
+# ========== health 监控 ==========
+HEALTH_URL="http://localhost:7860/health"
+INTERVAL=10
+FAIL_LIMIT=3
+FAIL_COUNT=0
+
+echo "[watchdog] start health checking..."
+
+while true; do
+  if curl -fs "$HEALTH_URL" > /dev/null; then
+    FAIL_COUNT=0
+  else
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    echo "[watchdog] healthcheck failed ($FAIL_COUNT/$FAIL_LIMIT)"
+  fi
+
+  if [ "$FAIL_COUNT" -ge "$FAIL_LIMIT" ]; then
+    echo "[watchdog] unhealthy, killing app..."
+    kill -TERM "$APP_PID"
+    sleep 2
+    kill -KILL "$APP_PID" || true
+    exit 1   # ⭐ 关键：让 Docker 认为容器异常退出
+  fi
+
+  sleep "$INTERVAL"
+done
