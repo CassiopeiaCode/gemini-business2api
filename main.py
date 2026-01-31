@@ -2193,6 +2193,12 @@ async def chat_impl(
         [m.model_dump() for m in req.messages],
         client_ip
     )
+
+    # 打印本次“查找key/保存key”（避免日志过长，仅打印后12位）
+    logger.info(
+        f"[CHAT] [req_{request_id}] session_key lookup={lookup_key[-12:]} store={store_key[-12:]} force_new={force_new}"
+    )
+
     # 之后所有“会话缓存/续期/切换账户”的键，统一使用最新的 store_key
     conv_key = store_key
     lock_key = store_key if force_new else lookup_key
@@ -2216,6 +2222,7 @@ async def chat_impl(
             if lookup_key != store_key:
                 try:
                     del multi_account_mgr.global_session_cache[lookup_key]
+                    logger.info(f"[CHAT] [req_{request_id}] session_key invalidated lookup={lookup_key[-12:]}")
                 except KeyError:
                     pass
         else:
@@ -2262,6 +2269,9 @@ async def chat_impl(
                 store_key,
                 account_manager.config.account_id,
                 google_session
+            )
+            logger.info(
+                f"[CHAT] [{account_manager.config.account_id}] [req_{request_id}] session_key saved store={store_key[-12:]} session={google_session[-12:]}"
             )
 
     # 提取用户消息内容用于日志
