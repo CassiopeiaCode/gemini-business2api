@@ -35,7 +35,7 @@ def _hash_key(parts: List[str], client_identifier: str = "") -> str:
 
 def _truncate_messages_to_nth_user(messages: List[dict], user_index_1based: int) -> List[dict]:
     """
-    返回从开头截断到“第 user_index_1based 条 user 消息（不含）”为止的消息列表。
+    返回从开头截断到“第 user_index_1based 条 user 消息（含）”为止的消息列表。
     若找不到对应 user 消息，则返回原 messages（保守行为）。
     """
     if user_index_1based <= 0:
@@ -45,7 +45,7 @@ def _truncate_messages_to_nth_user(messages: List[dict], user_index_1based: int)
         if msg.get("role") == "user":
             user_seen += 1
             if user_seen == user_index_1based:
-                return messages[:i]
+                return messages[: i + 1]
     return messages
 
 
@@ -64,8 +64,8 @@ def get_conversation_keys(messages: List[dict], client_identifier: str = "") -> 
 
     user_count = sum(1 for m in messages if m.get("role") == "user")
 
-    # store_key: 截断到最后一条 user（含）。由于截断函数是“不含第N条user”，这里传 user_count+1
-    store_msgs = _truncate_messages_to_nth_user(messages, (user_count + 1) if user_count > 0 else 0)
+    # store_key: 截断到最后一条 user（通常就是全量 messages，保守处理）
+    store_msgs = _truncate_messages_to_nth_user(messages, user_count if user_count > 0 else 0)
     store_parts: List[str] = []
     for msg in store_msgs:
         role = msg.get("role", "")
@@ -81,8 +81,7 @@ def get_conversation_keys(messages: List[dict], client_identifier: str = "") -> 
         return store_key, store_key, True
 
     # user_count >= 3
-    # lookup_key: 截断到倒数第二条 user（含）。由于截断函数是“不含第N条user”，这里传 user_count
-    lookup_msgs = _truncate_messages_to_nth_user(messages, user_count)
+    lookup_msgs = _truncate_messages_to_nth_user(messages, user_count - 1)
     lookup_parts: List[str] = []
     for msg in lookup_msgs:
         role = msg.get("role", "")
