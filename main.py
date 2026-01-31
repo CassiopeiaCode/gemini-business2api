@@ -80,6 +80,9 @@ from core.account import (
 # 导入 Uptime 追踪器
 from core import uptime as uptime_tracker
 
+from core.proxy_helper import choose_random_httpx_proxy
+from urllib.parse import urlsplit, urlunsplit
+
 # 导入配置管理和模板系统
 from core.config import config_manager, config
 
@@ -259,6 +262,28 @@ BASE_URL = config.basic.base_url
 SESSION_SECRET_KEY = config.security.session_secret_key
 SESSION_EXPIRE_HOURS = config.session.expire_hours
 
+def _redact_proxy_for_log(proxy_url: str) -> str:
+    if not proxy_url:
+        return ""
+    try:
+        parts = urlsplit(proxy_url)
+        if parts.username is None:
+            return proxy_url
+        host = parts.hostname or ""
+        port = f":{parts.port}" if parts.port else ""
+        user = parts.username or ""
+        netloc = f"{user}:***@{host}{port}"
+        return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    except Exception:
+        return "***"
+
+
+HTTPX_PROXY = choose_random_httpx_proxy(PROXY)
+if HTTPX_PROXY:
+    logger.info(f"[HTTP] 使用代理: {_redact_proxy_for_log(HTTPX_PROXY)}")
+else:
+    logger.info("[HTTP] 未配置代理")
+
 # ---------- 公开展示配置 ----------
 LOGO_URL = config.public_display.logo_url
 CHAT_URL = config.public_display.chat_url
@@ -287,7 +312,7 @@ MODEL_MAPPING = {
 
 # ---------- HTTP 客户端 ----------
 http_client = httpx.AsyncClient(
-    proxy=PROXY or None,
+    proxy=HTTPX_PROXY or None,
     verify=False,
     http2=False,
     timeout=httpx.Timeout(TIMEOUT_SECONDS, connect=60.0, pool=5.0),
@@ -320,8 +345,14 @@ async def rebuild_http_client(reason: str = "") -> None:
 
     async with _http_client_lock:
         old_client = http_client
+        new_proxy = choose_random_httpx_proxy(PROXY) or None
+        if new_proxy:
+            logger.info(f"[HTTP] 使用代理: {_redact_proxy_for_log(new_proxy)}")
+        else:
+            logger.info("[HTTP] 未配置代理")
+
         new_client = httpx.AsyncClient(
-            proxy=PROXY or None,
+            proxy=new_proxy,
             verify=False,
             http2=False,
             timeout=httpx.Timeout(TIMEOUT_SECONDS, connect=60.0, pool=5.0),
@@ -1333,7 +1364,7 @@ async def admin_get_settings(request: Request):
 @require_login()
 async def admin_update_settings(request: Request, new_settings: dict = Body(...)):
     """更新系统设置"""
-    global API_KEY, PROXY, BASE_URL, LOGO_URL, CHAT_URL
+    global API_KEY, PROXY, HTTPX_PROXY, BASE_URL, LOGO_URL, CHAT_URL
     global IMAGE_GENERATION_ENABLED, IMAGE_GENERATION_MODELS
     global MAX_NEW_SESSION_TRIES, MAX_REQUEST_RETRIES, MAX_ACCOUNT_SWITCH_TRIES
     global ACCOUNT_FAILURE_THRESHOLD, RATE_LIMIT_COOLDOWN_SECONDS, SESSION_CACHE_TTL_SECONDS, AUTO_REFRESH_ACCOUNTS_SECONDS
@@ -1387,6 +1418,11 @@ async def admin_update_settings(request: Request, new_settings: dict = Body(...)
         # 更新全局变量（实时生效）
         API_KEY = config.basic.api_key
         PROXY = config.basic.proxy
+        HTTPX_PROXY = choose_random_httpx_proxy(PROXY)
+        if HTTPX_PROXY:
+            logger.info(f"[HTTP] 使用代理: {_redact_proxy_for_log(HTTPX_PROXY)}")
+        else:
+            logger.info("[HTTP] 未配置代理")
         BASE_URL = config.basic.base_url
         LOGO_URL = config.public_display.logo_url
         CHAT_URL = config.public_display.chat_url
@@ -2207,9 +2243,13 @@ async def chat_impl(
         raise
 
     # 4. 准备文本内容
+    # - 新对话：把上下文作为“文档”上传给 Gemini，然后用固定 prompt 引导继续对话
+    # - 继续对话：只发送当前消息（不重复上传上下文文档）
+    context_doc_b64: Optional[str] = None
     if is_new_conversation:
-        # 新对话发送完整上下文（包含所有历史消息）
-        text_to_send = build_full_context_text(req.messages)
+        full_context_text = build_full_context_text(req.messages)
+        context_doc_b64 = base64.b64encode(full_context_text.encode("utf-8")).decode("utf-8")
+        text_to_send = "请继续文档中我们的对话\n\n" + (last_text or "")
         is_retry_mode = True
     else:
         # 继续对话只发送当前消息
@@ -2231,8 +2271,10 @@ async def chat_impl(
         current_text = text_to_send
         current_retry_mode = is_retry_mode
 
-        # 图片 ID 列表 (每次 Session 变化都需要重新上传，因为 fileId 绑定在 Session 上)
-        current_file_ids = []
+        # 图片/文件 ID 列表 (每次 Session 变化都需要重新上传，因为 fileId 绑定在 Session 上)
+        current_file_ids: List[str] = []
+        context_file_id: Optional[str] = None
+        message_file_ids: List[str] = []
 
         # 记录已失败的账户，避免重复使用
         failed_accounts = set()
@@ -2253,21 +2295,46 @@ async def chat_impl(
                     current_session = new_sess
                     current_retry_mode = True
                     current_file_ids = []
+                    message_file_ids = []
+                    context_file_id = None
                 else:
                     current_session = cached["session_id"]
 
-                # A. 如果有图片且还没上传到当前 Session，先上传
-                # 注意：每次重试如果是新 Session，都需要重新上传图片
-                if current_images and not current_file_ids:
+                # A. 新对话/重试模式：把完整上下文作为“文档”上传到当前 Session，并附带在 fileIds 里
+                # 注意：fileId 绑定 Session，因此每次切换 Session 都要重新上传
+                if current_retry_mode and context_doc_b64 and not context_file_id:
+                    context_file_id = await upload_context_file(
+                        current_session,
+                        "text/plain",
+                        context_doc_b64,
+                        account_manager,
+                        http_client,
+                        USER_AGENT,
+                        request_id,
+                    )
+                    current_file_ids.append(context_file_id)
+
+                # B. 上传本次消息的图片/文件（如果有）
+                # 注意：fileId 也绑定 Session；同一 Session 内避免重复上传
+                if current_images and not message_file_ids:
                     for img in current_images:
-                        fid = await upload_context_file(current_session, img["mime"], img["data"], account_manager, http_client, USER_AGENT, request_id)
+                        fid = await upload_context_file(
+                            current_session,
+                            img["mime"],
+                            img["data"],
+                            account_manager,
+                            http_client,
+                            USER_AGENT,
+                            request_id,
+                        )
+                        message_file_ids.append(fid)
                         current_file_ids.append(fid)
 
-                # B. 准备文本 (重试模式下发全文)
+                # C. 准备文本 (重试模式：上下文已作为文档上传，这里保持引导 prompt；不再拼接全文到 query)
                 if current_retry_mode:
-                    current_text = build_full_context_text(req.messages)
+                    current_text = "请继续文档中我们的对话\n\n" + (last_text or "")
 
-                # C. 发起对话
+                # D. 发起对话
                 async for chunk in stream_chat_generator(
                     current_session,
                     current_text,

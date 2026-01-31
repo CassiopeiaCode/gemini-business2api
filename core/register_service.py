@@ -108,6 +108,10 @@ class RegisterService(BaseTaskService[RegisterTask]):
     def _register_one(self, domain: Optional[str], task: RegisterTask) -> dict:
         """注册单个账户"""
         log_cb = lambda level, message: self._append_log(task, level, message)
+
+        # HTTP 代理：支持逗号分隔多个代理，调用时随机选择一个；并支持 host:port:user:pass 格式
+        from core.proxy_helper import choose_random_httpx_proxy
+        mail_proxy = choose_random_httpx_proxy((config.basic.proxy or "").strip())
         
         # 根据配置选择邮箱提供商
         mail_provider = (config.basic.mail_provider or "duckmail").lower()
@@ -116,7 +120,7 @@ class RegisterService(BaseTaskService[RegisterTask]):
             # 使用 ChatGPT Mail 客户端
             client = ChatGPTMailClient(
                 base_url=config.basic.chatgpt_mail_base_url,
-                proxy=config.basic.proxy,
+                proxy=mail_proxy,
                 verify_ssl=True,
                 log_callback=log_cb,
             )
@@ -127,7 +131,7 @@ class RegisterService(BaseTaskService[RegisterTask]):
             # 使用 DuckMail 客户端（默认）
             client = DuckMailClient(
                 base_url=config.basic.duckmail_base_url,
-                proxy=config.basic.proxy,
+                proxy=mail_proxy,
                 verify_ssl=config.basic.duckmail_verify_ssl,
                 api_key=config.basic.duckmail_api_key,
                 log_callback=log_cb,

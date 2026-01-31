@@ -8,6 +8,7 @@ import zipfile
 import tempfile
 import random
 from typing import Optional, Tuple, List
+from urllib.parse import quote
 
 
 def _split_proxy_list(raw: str) -> List[str]:
@@ -38,6 +39,7 @@ def parse_proxy(proxy_url: str) -> Tuple[Optional[str], Optional[str], Optional[
     - user:pass@host:port
     - host:port
     - host:port:username:password  （常见于部分代理商面板导出的格式）
+    - http://host:port:username:password（部分代理商导出格式，带 scheme）
 
     Returns:
         (proxy_server, username, password) 元组
@@ -86,6 +88,63 @@ def parse_proxy(proxy_url: str) -> Tuple[Optional[str], Optional[str], Optional[
 
     # 3) host:port（或其它不带认证的直连形式）
     return proxy_url, None, None
+
+
+def _detect_scheme(proxy_raw: str) -> str:
+    raw = (proxy_raw or "").strip().lower()
+    if raw.startswith("socks5://"):
+        return "socks5"
+    if raw.startswith("https://"):
+        return "https"
+    if raw.startswith("http://"):
+        return "http"
+    return "http"
+
+
+def normalize_proxy_for_httpx(proxy_raw: str) -> str:
+    """
+    将各种代理格式标准化为 httpx 可用的代理 URL。
+
+    支持：
+    - http://user:pass@host:port
+    - host:port
+    - host:port:user:pass
+    - http://host:port:user:pass
+    - socks5://host:port[:user:pass]
+
+    返回示例：
+    - http://host:port
+    - http://user:pass@host:port
+    """
+    if not proxy_raw:
+        return ""
+    proxy_raw = proxy_raw.strip()
+    if not proxy_raw:
+        return ""
+
+    scheme = _detect_scheme(proxy_raw)
+
+    server, username, password = parse_proxy(proxy_raw)
+    if not server:
+        return ""
+
+    if username is None:
+        return f"{scheme}://{server}"
+
+    user_enc = quote(str(username), safe="")
+    pass_enc = quote(str(password or ""), safe="")
+    return f"{scheme}://{user_enc}:{pass_enc}@{server}"
+
+
+def choose_random_httpx_proxy(raw: str) -> str:
+    """
+    从逗号分隔的代理列表中随机选一个，并规范化为 httpx 可用的代理 URL。
+
+    支持示例：
+    - http://p.webshare.io:80:mqctkwnq-rotate:pcwx9yuh72gn,http://p.webshare.io:80:mrxejnvh-rotate:8ri7r33duyft
+    """
+    picked = choose_random_proxy(raw)
+    return normalize_proxy_for_httpx(picked)
 
 
 def create_proxy_auth_extension(username: str, password: str, output_dir: str = None) -> str:

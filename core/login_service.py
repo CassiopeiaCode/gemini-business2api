@@ -128,6 +128,10 @@ class LoginService(BaseTaskService[LoginTask]):
 
         log_cb = lambda level, message: self._append_log(task, level, f"[{account_id}] {message}")
 
+        # HTTP 代理：支持逗号分隔多个代理，调用时随机选择一个；并支持 host:port:user:pass 格式
+        from core.proxy_helper import choose_random_httpx_proxy
+        mail_proxy = choose_random_httpx_proxy((config.basic.proxy or "").strip())
+
         # 创建邮件客户端
         if mail_provider == "microsoft":
             if not mail_client_id or not mail_refresh_token:
@@ -137,7 +141,7 @@ class LoginService(BaseTaskService[LoginTask]):
                 client_id=mail_client_id,
                 refresh_token=mail_refresh_token,
                 tenant=mail_tenant,
-                proxy=config.basic.proxy,
+                proxy=mail_proxy,
                 log_callback=log_cb,
             )
             client.set_credentials(mail_address)
@@ -145,7 +149,7 @@ class LoginService(BaseTaskService[LoginTask]):
             # ChatGPT Mail: 不需要密码，只需要邮箱地址
             client = ChatGPTMailClient(
                 base_url=config.basic.chatgpt_mail_base_url,
-                proxy=config.basic.proxy,
+                proxy=mail_proxy,
                 verify_ssl=True,
                 log_callback=log_cb,
             )
@@ -156,7 +160,7 @@ class LoginService(BaseTaskService[LoginTask]):
             # DuckMail: account_id 就是邮箱地址
             client = DuckMailClient(
                 base_url=config.basic.duckmail_base_url,
-                proxy=config.basic.proxy,
+                proxy=mail_proxy,
                 verify_ssl=config.basic.duckmail_verify_ssl,
                 api_key=config.basic.duckmail_api_key,
                 log_callback=log_cb,
