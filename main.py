@@ -56,7 +56,8 @@ from core.message import (
     get_conversation_key,
     get_conversation_keys,
     parse_last_message,
-    build_full_context_text
+    build_full_context_text,
+    build_full_context_text_with_selective_base64,
 )
 from core.google_api import (
     get_common_headers,
@@ -2368,15 +2369,71 @@ async def chat_impl(
                 # A. 新对话/重试模式：把完整上下文作为“文档”上传到当前 Session，并附带在 fileIds 里
                 # 注意：fileId 绑定 Session，因此每次切换 Session 都要重新上传
                 if current_retry_mode and context_doc_b64 and not context_file_id:
-                    context_file_id = await upload_context_file(
-                        current_session,
-                        "text/plain",
-                        context_doc_b64,
-                        account_manager,
-                        http_client,
-                        USER_AGENT,
-                        request_id,
-                    )
+                    try:
+                        context_file_id = await upload_context_file(
+                            current_session,
+                            "text/plain",
+                            context_doc_b64,
+                            account_manager,
+                            http_client,
+                            USER_AGENT,
+                            request_id,
+                        )
+                    except HTTPException as e:
+                        # Model Armor block：按消息长度分位数逐步 base64 化上下文再试
+                        detail = e.detail
+                        is_model_armor = (
+                            isinstance(e, HTTPException)
+                            and e.status_code == 400
+                            and isinstance(detail, dict)
+                            and isinstance(detail.get("error"), dict)
+                            and detail["error"].get("type") == "model_armor_violation"
+                        )
+                        if not is_model_armor:
+                            raise
+
+                        strategies = [
+                            ("p75", {"percentile": 0.75, "encode_all": False}),
+                            ("p25", {"percentile": 0.25, "encode_all": False}),
+                            ("all", {"percentile": None, "encode_all": True}),
+                        ]
+
+                        last_upload_err: Exception = e
+                        uploaded = False
+
+                        for tag, opts in strategies:
+                            try:
+                                transformed_text = build_full_context_text_with_selective_base64(
+                                    req.messages,
+                                    percentile=opts["percentile"],
+                                    encode_all=opts["encode_all"],
+                                )
+                                transformed_b64 = base64.b64encode(
+                                    transformed_text.encode("utf-8")
+                                ).decode("utf-8")
+
+                                logger.warning(
+                                    f"[CHAT] [{account_manager.config.account_id}] [req_{request_id}] "
+                                    f"MODEL_ARMOR_VIOLATION: 上下文上传被拦截，使用 {tag} 策略重试上传"
+                                )
+
+                                context_file_id = await upload_context_file(
+                                    current_session,
+                                    "text/plain",
+                                    transformed_b64,
+                                    account_manager,
+                                    http_client,
+                                    USER_AGENT,
+                                    request_id,
+                                )
+                                uploaded = True
+                                break
+                            except Exception as retry_err:
+                                last_upload_err = retry_err
+
+                        if not uploaded:
+                            raise last_upload_err
+
                     current_file_ids.append(context_file_id)
 
                 # B. 上传本次消息的图片/文件（如果有）

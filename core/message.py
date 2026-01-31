@@ -178,7 +178,24 @@ async def parse_last_message(messages: List['Message'], http_client: httpx.Async
     return text_content, images
 
 
-def build_full_context_text(messages: List['Message']) -> str:
+def _percentile_threshold(lengths: List[int], p: float) -> int:
+    """
+    返回分位数阈值（0~1），用于选择“长度 >= 阈值”的消息集合。
+    使用 nearest-rank 的保守实现，避免依赖 numpy。
+    """
+    if not lengths:
+        return 0
+    p = max(0.0, min(1.0, float(p)))
+    sorted_lens = sorted(lengths)
+    if len(sorted_lens) == 1:
+        return sorted_lens[0]
+    # nearest-rank on [0, n-1]
+    idx = int(round(p * (len(sorted_lens) - 1)))
+    idx = max(0, min(len(sorted_lens) - 1, idx))
+    return sorted_lens[idx]
+
+
+def build_full_context_text(messages: List["Message"]) -> str:
     """仅拼接历史文本，图片只处理当次请求的"""
     prompt = ""
     for msg in messages:
@@ -192,4 +209,46 @@ def build_full_context_text(messages: List['Message']) -> str:
                 content_str += "[图片]" * image_count
 
         prompt += f"{role}: {content_str}\n\n"
+    return prompt
+
+
+def build_full_context_text_with_selective_base64(
+    messages: List["Message"],
+    percentile: float | None = None,
+    encode_all: bool = False,
+) -> str:
+    """
+    构建上下文文本，并按消息长度选择性对 content 做 base64。
+    - encode_all=True: 所有消息 content 都 base64
+    - percentile 不为 None: 选取长度 >= P 分位数阈值的消息进行 base64（例如 0.75 / 0.25）
+    """
+    lengths: List[int] = []
+    raw_contents: List[str] = []
+    roles: List[str] = []
+
+    for msg in messages:
+        role = "User" if msg.role in ["user", "system"] else "Assistant"
+        content_str = extract_text_from_content(msg.content)
+
+        if isinstance(msg.content, list):
+            image_count = sum(1 for part in msg.content if part.get("type") == "image_url")
+            if image_count > 0:
+                content_str += "[图片]" * image_count
+
+        roles.append(role)
+        raw_contents.append(content_str)
+        lengths.append(len(content_str or ""))
+
+    threshold = 0
+    if (not encode_all) and (percentile is not None):
+        threshold = _percentile_threshold(lengths, percentile)
+
+    prompt = ""
+    for role, content_str, ln in zip(roles, raw_contents, lengths):
+        need_encode = encode_all or ((percentile is not None) and (ln >= threshold))
+        if need_encode:
+            b64 = base64.b64encode((content_str or "").encode("utf-8")).decode("utf-8")
+            prompt += f"{role}: [BASE64]{b64}\n\n"
+        else:
+            prompt += f"{role}: {content_str}\n\n"
     return prompt
