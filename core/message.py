@@ -7,7 +7,7 @@ import base64
 import hashlib
 import logging
 import re
-from typing import List, TYPE_CHECKING
+from typing import List, TYPE_CHECKING, Tuple
 
 import httpx
 
@@ -17,47 +17,88 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def get_conversation_key(messages: List[dict], client_identifier: str = "") -> str:
+def _normalize_message_text(content) -> str:
+    if isinstance(content, list):
+        # 多模态消息：只提取文本部分
+        text = extract_text_from_content(content)
+    else:
+        text = str(content)
+    return text.strip().lower()
+
+
+def _hash_key(parts: List[str], client_identifier: str = "") -> str:
+    prefix = "|".join(parts)
+    if client_identifier:
+        prefix = f"{client_identifier}|{prefix}"
+    return hashlib.md5(prefix.encode()).hexdigest()
+
+
+def _truncate_messages_to_nth_user(messages: List[dict], user_index_1based: int) -> List[dict]:
     """
-    生成对话指纹（使用前3条消息+客户端标识，确保唯一性）
+    返回从开头截断到“第 user_index_1based 条 user 消息（含）”为止的消息列表。
+    若找不到对应 user 消息，则返回原 messages（保守行为）。
+    """
+    if user_index_1based <= 0:
+        return []
+    user_seen = 0
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "user":
+            user_seen += 1
+            if user_seen == user_index_1based:
+                return messages[: i + 1]
+    return messages
 
-    策略：
-    1. 使用前3条消息生成指纹（而非仅第1条）
-    2. 加入客户端标识（IP或request_id）避免不同用户冲突
-    3. 保持Session复用能力（同一用户的后续消息仍能找到同一Session）
 
-    Args:
-        messages: 消息列表
-        client_identifier: 客户端标识（如IP地址或request_id），用于区分不同用户
+def get_conversation_keys(messages: List[dict], client_identifier: str = "") -> Tuple[str, str, bool]:
+    """
+    生成会话复用相关的 key（lookup_key / store_key）以及是否强制新会话。
+
+    规则（按 user 消息条数统计）：
+    - user_count < 2: 强制新会话；store_key=“最后一条 user 及之前所有消息”；lookup_key 同 store_key
+    - user_count == 2: 强制新会话；store_key=“最后一条 user 及之前所有消息”；lookup_key 同 store_key（但调用方需跳过查找）
+    - user_count >= 3: lookup_key=“倒数第二条 user 及之前所有消息”；store_key=“最后一条 user 及之前所有消息”
     """
     if not messages:
-        return f"{client_identifier}:empty" if client_identifier else "empty"
+        empty = f"{client_identifier}:empty" if client_identifier else "empty"
+        return empty, empty, True
 
-    # 提取前3条消息的关键信息（角色+内容）
-    message_fingerprints = []
-    for msg in messages[:3]:  # 只取前3条
+    user_count = sum(1 for m in messages if m.get("role") == "user")
+
+    # store_key: 截断到最后一条 user（通常就是全量 messages，保守处理）
+    store_msgs = _truncate_messages_to_nth_user(messages, user_count if user_count > 0 else 0)
+    store_parts: List[str] = []
+    for msg in store_msgs:
         role = msg.get("role", "")
-        content = msg.get("content", "")
+        text = _normalize_message_text(msg.get("content", ""))
+        store_parts.append(f"{role}:{text}")
+    store_key = _hash_key(store_parts, client_identifier=client_identifier)
 
-        # 统一处理内容格式（字符串或数组）
-        if isinstance(content, list):
-            # 多模态消息：只提取文本部分
-            text = extract_text_from_content(content)
-        else:
-            text = str(content)
+    if user_count < 2:
+        return store_key, store_key, True
 
-        # 标准化：去除首尾空白，转小写
-        text = text.strip().lower()
+    if user_count == 2:
+        # 不复用，但会保存 store_key 以便未来复用
+        return store_key, store_key, True
 
-        # 组合角色和内容
-        message_fingerprints.append(f"{role}:{text}")
+    # user_count >= 3
+    lookup_msgs = _truncate_messages_to_nth_user(messages, user_count - 1)
+    lookup_parts: List[str] = []
+    for msg in lookup_msgs:
+        role = msg.get("role", "")
+        text = _normalize_message_text(msg.get("content", ""))
+        lookup_parts.append(f"{role}:{text}")
+    lookup_key = _hash_key(lookup_parts, client_identifier=client_identifier)
 
-    # 使用前3条消息+客户端标识生成指纹
-    conversation_prefix = "|".join(message_fingerprints)
-    if client_identifier:
-        conversation_prefix = f"{client_identifier}|{conversation_prefix}"
+    return lookup_key, store_key, False
 
-    return hashlib.md5(conversation_prefix.encode()).hexdigest()
+
+def get_conversation_key(messages: List[dict], client_identifier: str = "") -> str:
+    """
+    兼容入口：返回 lookup_key。
+    调用方如需“强制新会话但仍保存映射”的能力，请使用 [`get_conversation_keys()`](core/message.py:1)。
+    """
+    lookup_key, _store_key, _force_new = get_conversation_keys(messages, client_identifier=client_identifier)
+    return lookup_key
 
 
 def extract_text_from_content(content) -> str:

@@ -54,6 +54,7 @@ from core.gemini_format import (
 # 导入核心模块
 from core.message import (
     get_conversation_key,
+    get_conversation_keys,
     parse_last_message,
     build_full_context_text
 )
@@ -2187,13 +2188,21 @@ async def chat_impl(
     # 保存模型信息到 request.state（用于 Uptime 追踪）
     request.state.model = req.model
 
-    # 3. 生成会话指纹，获取Session锁（防止同一对话的并发请求冲突）
-    conv_key = get_conversation_key([m.model_dump() for m in req.messages], client_ip)
-    session_lock = await multi_account_mgr.acquire_session_lock(conv_key)
+    # 3. 生成会话复用 key（按 user 轮次窗口），并决定是否强制新会话
+    lookup_key, store_key, force_new = get_conversation_keys(
+        [m.model_dump() for m in req.messages],
+        client_ip
+    )
+    # 之后所有“会话缓存/续期/切换账户”的键，统一使用最新的 store_key
+    conv_key = store_key
+    lock_key = store_key if force_new else lookup_key
+    session_lock = await multi_account_mgr.acquire_session_lock(lock_key)
 
     # 4. 在锁的保护下检查缓存和处理Session（保证同一对话的请求串行化）
     async with session_lock:
-        cached_session = multi_account_mgr.global_session_cache.get(conv_key)
+        cached_session = None
+        if not force_new:
+            cached_session = multi_account_mgr.global_session_cache.get(lookup_key)
 
         if cached_session:
             # 使用已绑定的账户
@@ -2202,8 +2211,15 @@ async def chat_impl(
             google_session = cached_session["session_id"]
             is_new_conversation = False
             logger.info(f"[CHAT] [{account_id}] [req_{request_id}] 继续会话: {google_session[-12:]}")
+
+            # 复用命中后：让旧 key 失效（key 向前滚动），只保留最新 store_key
+            if lookup_key != store_key:
+                try:
+                    del multi_account_mgr.global_session_cache[lookup_key]
+                except KeyError:
+                    pass
         else:
-            # 新对话：轮询选择可用账户，失败时尝试其他账户
+            # 新对话（或强制新会话）：轮询选择可用账户，失败时尝试其他账户
             max_account_tries = min(MAX_NEW_SESSION_TRIES, len(multi_account_mgr.accounts))
             last_error = None
 
@@ -2219,14 +2235,8 @@ async def chat_impl(
                         else:
                             raise
 
-                    # 线程安全地绑定账户到此对话
-                    await multi_account_mgr.set_session_cache(
-                        conv_key,
-                        account_manager.config.account_id,
-                        google_session
-                    )
                     is_new_conversation = True
-                    logger.info(f"[CHAT] [{account_manager.config.account_id}] [req_{request_id}] 新会话创建并绑定账户")
+                    logger.info(f"[CHAT] [{account_manager.config.account_id}] [req_{request_id}] 新会话创建成功")
                     # 记录账号池状态（账户可用）
                     uptime_tracker.record_request("account_pool", True)
                     break
@@ -2245,6 +2255,14 @@ async def chat_impl(
                         await finalize_result(status, 503, f"All accounts unavailable: {str(last_error)[:100]}")
                         raise HTTPException(503, f"All accounts unavailable: {str(last_error)[:100]}")
                     # 继续尝试下一个账户
+
+        # 无论是复用还是新建，都用 store_key 更新 key->(account, session) 映射
+        if account_manager and google_session:
+            await multi_account_mgr.set_session_cache(
+                store_key,
+                account_manager.config.account_id,
+                google_session
+            )
 
     # 提取用户消息内容用于日志
     if req.messages:
@@ -2286,7 +2304,7 @@ async def chat_impl(
     if is_new_conversation:
         full_context_text = build_full_context_text(req.messages)
         context_doc_b64 = base64.b64encode(full_context_text.encode("utf-8")).decode("utf-8")
-        text_to_send = "请继续文档中我们的对话\n\n" + (last_text or "")
+        text_to_send = "请自然地继续文档中的对话，并且不要提及本消息\n\n" + (last_text or "")
         is_retry_mode = True
     else:
         # 继续对话只发送当前消息
@@ -2369,7 +2387,7 @@ async def chat_impl(
 
                 # C. 准备文本 (重试模式：上下文已作为文档上传，这里保持引导 prompt；不再拼接全文到 query)
                 if current_retry_mode:
-                    current_text = "请继续文档中我们的对话\n\n" + (last_text or "")
+                    current_text = "请自然地继续文档中的对话，并且不要提及本消息\n\n" + (last_text or "")
 
                 # D. 发起对话
                 async for chunk in stream_chat_generator(
