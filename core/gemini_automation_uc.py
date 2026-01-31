@@ -16,6 +16,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 from .proxy_helper import parse_proxy, get_proxy_extension_path
+from .browser_failure_tracker import record_browser_failure
 
 
 # 常量
@@ -51,11 +52,13 @@ class GeminiAutomationUC:
         except Exception as exc:
             error_msg = str(exc)
             self._log("error", f"automation error: {error_msg}")
-            
-            # 检测浏览器连接错误，清理进程和缓存
+
+            # 检测浏览器连接/启动错误：计入全局失败次数，超过阈值将直接 SystemExit
             if "浏览器无法链接" in error_msg or "remote-debugging-port" in error_msg or "WebDriverException" in error_msg:
+                fail_count = record_browser_failure()
+                self._log("warning", f"browser startup failure recorded (global_count={fail_count})")
                 self._cleanup_browser_processes()
-            
+
             return {"success": False, "error": error_msg}
         finally:
             self._cleanup()
