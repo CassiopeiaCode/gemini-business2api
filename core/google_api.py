@@ -138,11 +138,34 @@ async def upload_context_file(
     request_id: str = ""
 ) -> str:
     """上传文件到指定 Session，返回 fileId"""
+
+    def _extract_model_armor_violation(payload: dict) -> dict | None:
+        """
+        解析 Model Armor 拦截（Prompt Injection / Jailbreak 等）错误。
+        返回结构化信息，供上层识别为“不可重试”并向下游透传更清晰的提示。
+        """
+        err = (payload or {}).get("error") or {}
+        details = err.get("details") or []
+        if not isinstance(details, list):
+            return None
+        for item in details:
+            if not isinstance(item, dict):
+                continue
+            if item.get("reason") != "MODEL_ARMOR_VIOLATION":
+                continue
+            meta = item.get("metadata") or {}
+            return {
+                "upstream_reason": "MODEL_ARMOR_VIOLATION",
+                "upstream_domain": item.get("domain"),
+                "upstream_details": meta.get("details"),
+            }
+        return None
+
     jwt = await account_manager.get_jwt(request_id)
     headers = get_common_headers(jwt, user_agent)
 
     # 生成随机文件名
-    ext = mime_type.split('/')[-1] if '/' in mime_type else "bin"
+    ext = mime_type.split("/")[-1] if "/" in mime_type else "bin"
     file_name = f"upload_{int(time.time())}_{uuid.uuid4().hex[:6]}.{ext}"
 
     body = {
@@ -152,8 +175,8 @@ async def upload_context_file(
             "name": session_name,
             "fileName": file_name,
             "mimeType": mime_type,
-            "fileContents": base64_content
-        }
+            "fileContents": base64_content,
+        },
     }
 
     r = await http_client.post(
@@ -166,17 +189,64 @@ async def upload_context_file(
     if r.status_code != 200:
         logger.error(f"[FILE] [{account_manager.config.account_id}] {req_tag}文件上传失败: {r.status_code}")
         error_text = r.text
-        if r.status_code == 400:
-            try:
-                payload = json.loads(r.text or "{}")
-                message = payload.get("error", {}).get("message", "")
-            except Exception:
-                message = ""
-            if "Unsupported file type" in message:
-                mime_type = message.split("Unsupported file type:", 1)[-1].strip()
-                hint = f"不支持的文件类型: {mime_type}。请转换为 PDF、图片或纯文本后再上传。"
+
+        # 尽量结构化解析上游错误，便于上层做“是否重试”的决策，也便于下游理解。
+        payload = None
+        upstream_message = ""
+        upstream_code = None
+        try:
+            payload = json.loads(r.text or "{}")
+            upstream_message = str((payload.get("error") or {}).get("message") or "")
+            upstream_code = (payload.get("error") or {}).get("code")
+        except Exception:
+            payload = None
+
+        if r.status_code == 400 and payload:
+            if "Unsupported file type" in upstream_message:
+                bad_mime = upstream_message.split("Unsupported file type:", 1)[-1].strip()
+                hint = f"不支持的文件类型: {bad_mime}。请转换为 PDF、图片或纯文本后再上传。"
                 raise HTTPException(400, hint)
-        raise HTTPException(r.status_code, f"Upload failed: {error_text}")
+
+            model_armor = _extract_model_armor_violation(payload)
+            if model_armor:
+                # 标记为不可重试，避免上层继续切换账号/重建 session（无意义且更难定位）。
+                raise HTTPException(
+                    400,
+                    {
+                        "error": {
+                            "message": "Upload blocked by Google Model Armor (unsafe content).",
+                            "type": "model_armor_violation",
+                            "code": 400,
+                            "upstream": {
+                                "service": "biz-discoveryengine.googleapis.com",
+                                "endpoint": "widgetAddContextFile",
+                                "status": "INVALID_ARGUMENT",
+                                "code": upstream_code,
+                                "message": upstream_message,
+                                **model_armor,
+                            },
+                            "retriable": False,
+                            "hint": "文件/上下文被判定包含不安全内容（提示注入/越狱等）。请清理文件内容或改为仅上传安全摘录。",
+                        }
+                    },
+                )
+
+        # 默认透传（保留原始响应体，方便排查）
+        raise HTTPException(
+            r.status_code,
+            {
+                "error": {
+                    "message": f"Upload failed: {error_text}",
+                    "type": "upstream_error",
+                    "code": r.status_code,
+                    "upstream": {
+                        "service": "biz-discoveryengine.googleapis.com",
+                        "endpoint": "widgetAddContextFile",
+                    },
+                    "retriable": r.status_code >= 500,
+                }
+            },
+        )
 
     data = r.json()
     file_id = data.get("addContextFileResponse", {}).get("fileId")

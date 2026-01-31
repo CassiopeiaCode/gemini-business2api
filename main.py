@@ -523,7 +523,8 @@ async def serve_frontend_index():
 # 这会导致部分客户端将响应体视为“无效/空”，进而触发 0 秒重试。
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
-    if request.url.path.startswith("/v1beta/") and isinstance(exc.detail, dict) and "error" in exc.detail:
+    # 透传结构化错误：Gemini 原生格式 / OpenAI 兼容接口都允许直接返回 {"error": ...}
+    if isinstance(exc.detail, dict) and "error" in exc.detail:
         return JSONResponse(status_code=exc.status_code, content=exc.detail)
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
@@ -1817,9 +1818,23 @@ async def gemini_stream_generate(
                 yield "]"
 
         except HTTPException as e:
+            # 兼容：内部实现可能抛出 OpenAI 风格 {"error": {...}}；Gemini 端点应转换为 Gemini 错误格式
+            message = ""
+            details = None
+            if isinstance(e.detail, dict) and isinstance(e.detail.get("error"), dict):
+                err = e.detail.get("error") or {}
+                message = str(err.get("message") or "Upstream error")
+                details = [{
+                    "type": "openai_error",
+                    "error": err,
+                }]
+            else:
+                message = str(e.detail) if isinstance(e.detail, str) else json.dumps(e.detail, ensure_ascii=False)
+
             error_chunk = GeminiErrorConverter.create_error_response(
                 status_code=e.status_code,
-                message=str(e.detail) if isinstance(e.detail, str) else json.dumps(e.detail),
+                message=message,
+                details=details,
             )
             if use_sse:
                 yield f"data: {json.dumps(error_chunk, ensure_ascii=False)}\n\n"
@@ -2030,11 +2045,23 @@ async def gemini_generate(
         raise HTTPException(status_code=500, detail=error_response)
 
     except HTTPException as e:
-        if isinstance(e.detail, dict) and "error" in e.detail:
-            return JSONResponse(status_code=e.status_code, content=e.detail)
+        # 兼容：内部实现可能抛出 OpenAI 风格 {"error": {...}}；Gemini 端点应转换为 Gemini 错误格式
+        if isinstance(e.detail, dict) and isinstance(e.detail.get("error"), dict):
+            err = e.detail.get("error") or {}
+            message = str(err.get("message") or "Upstream error")
+            error_response = GeminiErrorConverter.create_error_response(
+                status_code=e.status_code,
+                message=message,
+                details=[{
+                    "type": "openai_error",
+                    "error": err,
+                }],
+            )
+            return JSONResponse(status_code=e.status_code, content=error_response)
+
         error_response = GeminiErrorConverter.create_error_response(
             status_code=e.status_code,
-            message=str(e.detail) if isinstance(e.detail, str) else json.dumps(e.detail),
+            message=str(e.detail) if isinstance(e.detail, str) else json.dumps(e.detail, ensure_ascii=False),
         )
         return JSONResponse(status_code=e.status_code, content=error_response)
     except (asyncio.TimeoutError, httpx.TimeoutException) as e:
@@ -2049,6 +2076,16 @@ async def gemini_generate(
             message=f"Internal error: {type(e).__name__}: {str(e)[:200]}",
         )
         return JSONResponse(status_code=500, content=error_response)
+
+
+def _build_openai_error(status_code: int, message: str, err_type: str = "upstream_error") -> dict:
+    return {
+        "error": {
+            "message": message,
+            "type": err_type,
+            "code": status_code,
+        }
+    }
 
 
 # chat实现函数
@@ -2369,6 +2406,31 @@ async def chat_impl(
                 break
 
             except (httpx.HTTPError, ssl.SSLError, HTTPException) as e:
+                # 先处理“不可重试”的明确错误：例如 Model Armor 拦截（切账号/重建 session 都无意义）
+                if isinstance(e, HTTPException) and e.status_code == 400:
+                    detail = e.detail
+                    if (
+                        isinstance(detail, dict)
+                        and isinstance(detail.get("error"), dict)
+                        and detail["error"].get("type") == "model_armor_violation"
+                    ):
+                        logger.error(
+                            f"[CHAT] [{account_manager.config.account_id}] [req_{request_id}] "
+                            f"MODEL_ARMOR_VIOLATION: {detail['error'].get('hint')}",
+                            exc_info=True,
+                        )
+                        await finalize_result(
+                            "error",
+                            400,
+                            "MODEL_ARMOR_VIOLATION (not retriable): "
+                            + str((detail.get("error") or {}).get("hint") or (detail.get("error") or {}).get("message") or "")[:200],
+                        )
+                        payload = detail  # 已是 OpenAI 风格 {"error": {...}}，可直接透传
+                        if req.stream:
+                            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                            return
+                        raise HTTPException(status_code=400, detail=payload)
+
                 status_code = e.status_code if isinstance(e, HTTPException) else None
                 error_detail = (
                     f"HTTP {e.status_code}: {e.detail}"
@@ -2430,7 +2492,10 @@ async def chat_impl(
                     if available_count == 0:
                         logger.error(f"[CHAT] [req_{request_id}] 所有账户均不可用，快速失败")
                         await finalize_result("error", 503, "All accounts unavailable")
-                        if req.stream: yield f"data: {json.dumps({'error': {'message': 'All accounts unavailable'}})}\n\n"
+                        if req.stream:
+                            yield f"data: {json.dumps(_build_openai_error(503, 'All accounts unavailable'), ensure_ascii=False)}\n\n"
+                        else:
+                            raise HTTPException(status_code=503, detail=_build_openai_error(503, "All accounts unavailable"))
                         return
 
                     # 尝试切换到其他账户（客户端会传递完整上下文）
@@ -2448,7 +2513,10 @@ async def chat_impl(
                         if not new_account:
                             logger.error(f"[CHAT] [req_{request_id}] 所有可用账户均已失败")
                             await finalize_result("error", 503, "All available accounts failed")
-                            if req.stream: yield f"data: {json.dumps({'error': {'message': 'All available accounts failed'}})}\n\n"
+                            if req.stream:
+                                yield f"data: {json.dumps(_build_openai_error(503, 'All available accounts failed'), ensure_ascii=False)}\n\n"
+                            else:
+                                raise HTTPException(status_code=503, detail=_build_openai_error(503, "All available accounts failed"))
                             return
 
                         logger.info(f"[CHAT] [req_{request_id}] 切换账户: {account_manager.config.account_id} -> {new_account.config.account_id}")
@@ -2481,14 +2549,29 @@ async def chat_impl(
                         status = classify_error_status(status_code, create_err)
 
                         await finalize_result(status, status_code, f"Account Failover Failed: {str(create_err)[:200]}")
-                        if req.stream: yield f"data: {json.dumps({'error': {'message': 'Account Failover Failed'}})}\n\n"
+                        if req.stream:
+                            yield f"data: {json.dumps(_build_openai_error(502, 'Account Failover Failed'), ensure_ascii=False)}\n\n"
+                        else:
+                            raise HTTPException(status_code=502, detail=_build_openai_error(502, "Account Failover Failed"))
                         return
                 else:
                     # 已达到最大重试次数
                     logger.error(f"[CHAT] [req_{request_id}] 已达到最大重试次数 ({max_retries})，请求失败")
                     status = classify_error_status(status_code, e)
                     await finalize_result(status, status_code, error_detail)
-                    if req.stream: yield f"data: {json.dumps({'error': {'message': f'Max retries ({max_retries}) exceeded: {e}'}})}\n\n"
+                    if isinstance(e, HTTPException):
+                        message = str(e.detail)
+                        payload = _build_openai_error(e.status_code, message)
+                        if req.stream:
+                            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                        else:
+                            raise HTTPException(status_code=e.status_code, detail=payload)
+                    else:
+                        payload = _build_openai_error(502, f"Max retries ({max_retries}) exceeded: {e}")
+                        if req.stream:
+                            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                        else:
+                            raise HTTPException(status_code=502, detail=payload)
                     return
 
     if req.stream:
