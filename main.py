@@ -1614,6 +1614,12 @@ async def gemini_stream_generate(
         try:
             response = await chat_impl(chat_request, request, None)
 
+            # 从内部 chat_impl 读取 prompt_tokens（tiktoken/完整上下文），同步到 Gemini usageMetadata
+            try:
+                converter.set_prompt_tokens(int(getattr(request.state, "prompt_tokens", 0) or 0))
+            except Exception:
+                pass
+
             if isinstance(response, StreamingResponse):
                 async for chunk_bytes in response.body_iterator:
                     chunk_str = chunk_bytes.decode("utf-8") if isinstance(chunk_bytes, (bytes, bytearray)) else str(chunk_bytes)
@@ -2090,6 +2096,30 @@ def _build_openai_error(status_code: int, message: str, err_type: str = "upstrea
     }
 
 
+def _tiktoken_encoding_for_model(model_name: str):
+    """
+    tiktoken 的模型映射主要覆盖 OpenAI 模型；这里做一个稳妥回退：
+    - 能 encoding_for_model 就用
+    - 否则统一用 cl100k_base（兼容性最好）
+    """
+    try:
+        import tiktoken  # type: ignore
+    except Exception as e:
+        raise RuntimeError(f"tiktoken not available: {type(e).__name__}: {e}")
+
+    try:
+        return tiktoken.encoding_for_model(model_name)
+    except Exception:
+        return tiktoken.get_encoding("cl100k_base")
+
+
+def _count_tokens_tiktoken(text: Optional[str], model_name: str) -> int:
+    if not text:
+        return 0
+    enc = _tiktoken_encoding_for_model(model_name or "")
+    return len(enc.encode(text))
+
+
 # chat实现函数
 async def chat_impl(
     req: ChatRequest,
@@ -2311,18 +2341,34 @@ async def chat_impl(
     # 4. 准备文本内容
     # - 新对话：把上下文作为“文档”上传给 Gemini，然后用固定 prompt 引导继续对话
     # - 继续对话：只发送当前消息（不重复上传上下文文档）
+    #
+    # 重要：token 计数必须按“完整 messages 上下文”统计，不能因 history 被转成文件上传就漏算。
     context_doc_b64: Optional[str] = None
+    full_context_text = build_full_context_text(req.messages)
+
+    # prompt_tokens：统一按完整上下文计算；新对话还会额外注入引导语，需一并计入。
+    instruction_prefix = "请自然地继续文档中的对话，并且不要提及本消息\n\n"
+    usage_prompt_text = full_context_text
+
     if is_new_conversation:
-        full_context_text = build_full_context_text(req.messages)
         context_doc_b64 = base64.b64encode(full_context_text.encode("utf-8")).decode("utf-8")
-        text_to_send = "请自然地继续文档中的对话，并且不要提及本消息\n\n" + (last_text or "")
+        text_to_send = instruction_prefix + (last_text or "")
+        usage_prompt_text = (full_context_text + "\n\n" + instruction_prefix + (last_text or "")).strip()
         is_retry_mode = True
     else:
         # 继续对话只发送当前消息
         text_to_send = last_text
+        # 但 usage 仍按完整上下文计算（req.messages 全量）
         is_retry_mode = False
         # 线程安全地更新时间戳
         await multi_account_mgr.update_session_time(conv_key)
+
+    # 统一计算 prompt_tokens（tiktoken），并写入 request.state，供 Gemini 流式包装器复用
+    prompt_tokens = _count_tokens_tiktoken(usage_prompt_text, req.model)
+    try:
+        request.state.prompt_tokens = prompt_tokens
+    except Exception:
+        pass
 
     chat_id = f"chatcmpl-{uuid.uuid4()}"
     created_time = int(time.time())
@@ -2691,13 +2737,18 @@ async def chat_impl(
     response_preview = full_content[:500] + "...(已截断)" if len(full_content) > 500 else full_content
     logger.info(f"[CHAT] [{account_manager.config.account_id}] [req_{request_id}] AI响应: {response_preview}")
 
+    # prompt_tokens 已在前面按完整上下文计算过（并写入 request.state）
+    prompt_tokens = int(getattr(request.state, "prompt_tokens", 0) or 0)
+    completion_tokens = _count_tokens_tiktoken(full_content, req.model) + _count_tokens_tiktoken(full_reasoning, req.model)
+    total_tokens = prompt_tokens + completion_tokens
+
     return {
         "id": chat_id,
         "object": "chat.completion",
         "created": created_time,
         "model": req.model,
         "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": total_tokens}
     }
 
 # ---------- 图片生成处理函数 ----------
