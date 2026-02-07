@@ -33,9 +33,11 @@ ACCOUNTS_FILE = os.path.join(DATA_DIR, "accounts.json")
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.yaml")
 STATS_FILE = os.path.join(DATA_DIR, "stats.json")
 IMAGE_DIR = os.path.join(DATA_DIR, "images")
+VIDEO_DIR = os.path.join(DATA_DIR, "videos")
 
-# 确保图片目录存在
+# 确保媒体目录存在
 os.makedirs(IMAGE_DIR, exist_ok=True)
+os.makedirs(VIDEO_DIR, exist_ok=True)
 
 # 导入认证模块
 from core.auth import verify_api_key, verify_gemini_api_key
@@ -312,6 +314,25 @@ MODEL_MAPPING = {
     "gemini-3-pro-preview": "gemini-3-pro-preview"
 }
 
+# ---------- 虚拟生成模型 ----------
+VIRTUAL_MODELS = {
+    "gemini-imagen": {"imageGenerationSpec": {}},
+    "gemini-veo": {"videoGenerationSpec": {}},
+}
+
+
+def get_tools_spec(model_name: str) -> dict:
+    if model_name in VIRTUAL_MODELS:
+        return dict(VIRTUAL_MODELS[model_name])
+
+    tools_spec = {
+        "webGroundingSpec": {},
+        "toolRegistry": "default_tool_registry",
+    }
+    if IMAGE_GENERATION_ENABLED and model_name in IMAGE_GENERATION_MODELS:
+        tools_spec["imageGenerationSpec"] = {}
+    return tools_spec
+
 # ---------- HTTP 客户端 ----------
 http_client = httpx.AsyncClient(
     proxy=HTTPX_PROXY or None,
@@ -574,13 +595,17 @@ async def track_uptime_middleware(request: Request, call_next):
         raise
 
 
-# ---------- 图片静态服务初始化 ----------
+# ---------- 图片/视频静态服务初始化 ----------
 os.makedirs(IMAGE_DIR, exist_ok=True)
+os.makedirs(VIDEO_DIR, exist_ok=True)
 app.mount("/images", StaticFiles(directory=IMAGE_DIR), name="images")
+app.mount("/videos", StaticFiles(directory=VIDEO_DIR), name="videos")
 if IMAGE_DIR == "/data/images":
     logger.info(f"[SYSTEM] 图片静态服务已启用: /images/ -> {IMAGE_DIR} (HF Pro持久化)")
+    logger.info(f"[SYSTEM] 视频静态服务已启用: /videos/ -> {VIDEO_DIR} (HF Pro持久化)")
 else:
     logger.info(f"[SYSTEM] 图片静态服务已启用: /images/ -> {IMAGE_DIR} (本地持久化)")
+    logger.info(f"[SYSTEM] 视频静态服务已启用: /videos/ -> {VIDEO_DIR} (本地持久化)")
 
 # ---------- 后台任务启动 ----------
 
@@ -992,6 +1017,16 @@ class ChatRequest(BaseModel):
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
 
+class ImageGenerationRequest(BaseModel):
+    prompt: str
+    model: str = "gemini-imagen"
+    n: Optional[int] = 1
+    size: Optional[str] = "1024x1024"
+    response_format: Optional[str] = None
+    quality: Optional[str] = "standard"
+    style: Optional[str] = "natural"
+
+
 def create_chunk(id: str, created: int, model: str, delta: dict, finish_reason: Union[str, None]) -> str:
     chunk = {
         "id": id,
@@ -1344,6 +1379,9 @@ async def admin_get_settings(request: Request):
             "supported_models": config.image_generation.supported_models,
             "output_format": config.image_generation.output_format
         },
+        "video_generation": {
+            "output_format": config.video_generation.output_format
+        },
         "retry": {
             "max_new_session_tries": config.retry.max_new_session_tries,
             "max_request_retries": config.retry.max_request_retries,
@@ -1398,6 +1436,13 @@ async def admin_update_settings(request: Request, new_settings: dict = Body(...)
             output_format = "base64"
         image_generation["output_format"] = output_format
         new_settings["image_generation"] = image_generation
+
+        video_generation = dict(new_settings.get("video_generation") or {})
+        video_output_format = str(video_generation.get("output_format") or config_manager.video_output_format).lower()
+        if video_output_format not in ("html", "url", "markdown"):
+            video_output_format = "html"
+        video_generation["output_format"] = video_output_format
+        new_settings["video_generation"] = video_generation
 
         retry = dict(new_settings.get("retry") or {})
         retry.setdefault("auto_refresh_accounts_seconds", config.retry.auto_refresh_accounts_seconds)
@@ -1534,6 +1579,8 @@ async def list_models(authorization: str = Header(None)):
     now = int(time.time())
     for m in MODEL_MAPPING.keys():
         data.append({"id": m, "object": "model", "created": now, "owned_by": "google", "permission": []})
+    data.append({"id": "gemini-imagen", "object": "model", "created": now, "owned_by": "google", "permission": []})
+    data.append({"id": "gemini-veo", "object": "model", "created": now, "owned_by": "google", "permission": []})
     return {"object": "list", "data": data}
 
 @app.get("/v1/models/{model_id}")
@@ -2208,12 +2255,12 @@ async def chat_impl(
         await save_stats(global_stats)
 
     # 2. 模型校验
-    if req.model not in MODEL_MAPPING:
+    if req.model not in MODEL_MAPPING and req.model not in VIRTUAL_MODELS:
         logger.error(f"[CHAT] [req_{request_id}] 不支持的模型: {req.model}")
         await finalize_result("error", 404, f"HTTP 404: Model '{req.model}' not found")
         raise HTTPException(
             status_code=404,
-            detail=f"Model '{req.model}' not found. Available models: {list(MODEL_MAPPING.keys())}"
+            detail=f"Model '{req.model}' not found. Available models: {list(MODEL_MAPPING.keys()) + list(VIRTUAL_MODELS.keys())}"
         )
 
     # 保存模型信息到 request.state（用于 Uptime 追踪）
@@ -2751,6 +2798,36 @@ async def chat_impl(
         "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": total_tokens}
     }
 
+def process_image(data: bytes, mime: str, chat_id: str, file_id: str, base_url: str, idx: int, request_id: str, account_id: str) -> str:
+    output_format = config_manager.image_output_format
+    if output_format == "base64":
+        b64 = base64.b64encode(data).decode()
+        logger.info(f"[IMAGE] [{account_id}] [req_{request_id}] 图片{idx}已编码为base64")
+        return f"\n\n![生成的图片](data:{mime};base64,{b64})\n\n"
+
+    image_url = save_image_to_hf(data, chat_id, file_id, mime, IMAGE_DIR, base_url, "images")
+    logger.info(f"[IMAGE] [{account_id}] [req_{request_id}] 图片{idx}已保存: {image_url}")
+    return f"\n\n![生成的图片]({image_url})\n\n"
+
+
+def process_video(data: bytes, mime: str, chat_id: str, file_id: str, base_url: str, idx: int, request_id: str, account_id: str) -> str:
+    video_url = save_image_to_hf(data, chat_id, file_id, mime, VIDEO_DIR, base_url, "videos")
+    logger.info(f"[VIDEO] [{account_id}] [req_{request_id}] 视频{idx}已保存: {video_url}")
+    output_format = config_manager.video_output_format
+
+    if output_format == "html":
+        return f'\n\n<video controls width="100%" style="max-width: 640px;"><source src="{video_url}" type="{mime}">您的浏览器不支持视频播放</video>\n\n'
+    if output_format == "markdown":
+        return f"\n\n![生成的视频]({video_url})\n\n"
+    return f"\n\n{video_url}\n\n"
+
+
+def process_media(data: bytes, mime: str, chat_id: str, file_id: str, base_url: str, idx: int, request_id: str, account_id: str) -> str:
+    if mime.startswith("video/"):
+        return process_video(data, mime, chat_id, file_id, base_url, idx, request_id, account_id)
+    return process_image(data, mime, chat_id, file_id, base_url, idx, request_id, account_id)
+
+
 # ---------- 图片生成处理函数 ----------
 def parse_images_from_response(data_list: list) -> tuple[list, str]:
     """从API响应中解析图片文件引用
@@ -2759,6 +2836,7 @@ def parse_images_from_response(data_list: list) -> tuple[list, str]:
     """
     file_ids = []
     session_name = ""
+    seen_file_ids = set()
 
     for data in data_list:
         sar = data.get("streamAssistResponse")
@@ -2780,8 +2858,12 @@ def parse_images_from_response(data_list: list) -> tuple[list, str]:
             # 检查file字段（图片生成的关键）
             file_info = content.get("file")
             if file_info and file_info.get("fileId"):
+                fid = file_info["fileId"]
+                if fid in seen_file_ids:
+                    continue
+                seen_file_ids.add(fid)
                 file_ids.append({
-                    "fileId": file_info["fileId"],
+                    "fileId": fid,
                     "mimeType": file_info.get("mimeType", "image/png")
                 })
 
@@ -2802,15 +2884,7 @@ async def stream_chat_generator(session: str, text_content: str, file_ids: List[
     jwt = await account_manager.get_jwt(request_id)
     headers = get_common_headers(jwt, USER_AGENT)
 
-    # 构建 toolsSpec（根据配置决定是否启用图片生成）
-    tools_spec = {
-        "webGroundingSpec": {},
-        "toolRegistry": "default_tool_registry",
-    }
-    # 只在启用且模型支持时添加图片生成
-    if IMAGE_GENERATION_ENABLED and model_name in IMAGE_GENERATION_MODELS:
-        tools_spec["imageGenerationSpec"] = {}
-        tools_spec["videoGenerationSpec"] = {}
+    tools_spec = get_tools_spec(model_name)
 
     body = {
         "configId": account_manager.config.config_id,
@@ -2908,6 +2982,7 @@ async def stream_chat_generator(session: str, text_content: str, file_ids: List[
                 fid = file_info["fileId"]
                 mime = file_info["mimeType"]
                 meta = file_metadata.get(fid, {})
+                mime = meta.get("mimeType", mime)
                 correct_session = meta.get("session") or session_name
                 task = download_image_with_jwt(account_manager, correct_session, fid, http_client, USER_AGENT, request_id)
                 download_tasks.append((fid, mime, task))
@@ -2926,20 +3001,16 @@ async def stream_chat_generator(session: str, text_content: str, file_ids: List[
                     continue
 
                 try:
-                    # 根据配置选择输出格式
-                    output_format = config_manager.image_output_format
-
-                    if output_format == "base64":
-                        # Base64 模式：直接返回 base64 编码
-                        b64 = base64.b64encode(result).decode()
-                        markdown = f"\n\n![生成的图片](data:{mime};base64,{b64})\n\n"
-                        logger.info(f"[IMAGE] [{account_manager.config.account_id}] [req_{request_id}] 图片{idx}已编码为base64")
-                    else:
-                        # URL 模式：保存到本地并返回 URL
-                        image_url = save_image_to_hf(result, chat_id, fid, mime, base_url, IMAGE_DIR)
-                        markdown = f"\n\n![生成的图片]({image_url})\n\n"
-                        logger.info(f"[IMAGE] [{account_manager.config.account_id}] [req_{request_id}] 图片{idx}已保存: {image_url}")
-
+                    markdown = process_media(
+                        result,
+                        mime,
+                        chat_id,
+                        fid,
+                        base_url,
+                        idx,
+                        request_id,
+                        account_manager.config.account_id,
+                    )
                     success_count += 1
                     chunk = create_chunk(chat_id, created_time, model_name, {"content": markdown}, None)
                     yield f"data: {chunk}\n\n"
@@ -2952,9 +3023,8 @@ async def stream_chat_generator(session: str, text_content: str, file_ids: List[
             logger.info(f"[IMAGE] [{account_manager.config.account_id}] [req_{request_id}] 图片处理完成: {success_count}/{len(file_ids)} 成功")
 
         except Exception as e:
-            logger.error(f"[IMAGE] [{account_manager.config.account_id}] [req_{request_id}] 图片处理失败: {type(e).__name__}: {str(e)[:100]}")
-            # 降级处理：通知用户图片处理失败
-            error_msg = f"\n\n⚠️ 图片处理失败: {type(e).__name__}\n\n"
+            logger.error(f"[IMAGE] [{account_manager.config.account_id}] [req_{request_id}] 媒体处理失败: {type(e).__name__}: {str(e)[:100]}")
+            error_msg = f"\n\n⚠️ 媒体处理失败: {type(e).__name__}\n\n"
             chunk = create_chunk(chat_id, created_time, model_name, {"content": error_msg}, None)
             yield f"data: {chunk}\n\n"
 
@@ -2975,6 +3045,59 @@ async def stream_chat_generator(session: str, text_content: str, file_ids: List[
         final_chunk = create_chunk(chat_id, created_time, model_name, {}, "stop")
         yield f"data: {final_chunk}\n\n"
         yield "data: [DONE]\n\n"
+
+# ---------- 图片生成 API (OpenAI 兼容) ----------
+@app.post("/v1/images/generations")
+async def generate_images(
+    req: ImageGenerationRequest,
+    request: Request,
+    authorization: Optional[str] = Header(None)
+):
+    verify_api_key(API_KEY, authorization)
+
+    chat_req = ChatRequest(
+        model=req.model,
+        messages=[Message(role="user", content=req.prompt)],
+        stream=False
+    )
+
+    chat_response = await chat_impl(chat_req, request, authorization)
+    message_content = chat_response["choices"][0]["message"]["content"]
+
+    b64_pattern = r'!\[.*?\]\(data:([^;]+);base64,([^\)]+)\)'
+    b64_matches = re.findall(b64_pattern, message_content)
+    url_pattern = r'!\[.*?\]\((https?://[^\)]+)\)'
+    url_matches = re.findall(url_pattern, message_content)
+
+    response_format = req.response_format
+    if response_format not in ("url", "b64_json"):
+        response_format = "b64_json" if config_manager.image_output_format == "base64" else "url"
+
+    created_time = int(time.time())
+    data_list = []
+
+    if response_format == "b64_json":
+        for _, b64_data in b64_matches[: req.n or 1]:
+            data_list.append({"b64_json": b64_data, "revised_prompt": req.prompt})
+        if not data_list and url_matches:
+            for url in url_matches[: req.n or 1]:
+                resp = await http_client.get(url)
+                if resp.status_code == 200:
+                    data_list.append({"b64_json": base64.b64encode(resp.content).decode(), "revised_prompt": req.prompt})
+    else:
+        for url in url_matches[: req.n or 1]:
+            data_list.append({"url": url, "revised_prompt": req.prompt})
+        if not data_list and b64_matches:
+            base_url = get_base_url(request)
+            chat_id = f"img-{uuid.uuid4()}"
+            for _, b64_data in b64_matches[: req.n or 1]:
+                img_data = base64.b64decode(b64_data)
+                file_id = f"gen-{uuid.uuid4()}"
+                url = save_image_to_hf(img_data, chat_id, file_id, "image/png", IMAGE_DIR, base_url, "images")
+                data_list.append({"url": url, "revised_prompt": req.prompt})
+
+    return {"created": created_time, "data": data_list}
+
 
 # ---------- 公开端点（无需认证） ----------
 @app.get("/public/uptime")

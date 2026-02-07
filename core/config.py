@@ -70,6 +70,11 @@ class ImageGenerationConfig(BaseModel):
     output_format: str = Field(default="base64", description="图片输出格式：base64 或 url")
 
 
+class VideoGenerationConfig(BaseModel):
+    """视频生成配置"""
+    output_format: str = Field(default="html", description="视频输出格式：html、url 或 markdown")
+
+
 class RetryConfig(BaseModel):
     """重试策略配置"""
     max_new_session_tries: int = Field(default=5, ge=1, le=20, description="新会话尝试账户数")
@@ -107,6 +112,7 @@ class AppConfig(BaseModel):
     # 业务配置（环境变量 > YAML > 默认值）
     basic: BasicConfig
     image_generation: ImageGenerationConfig
+    video_generation: VideoGenerationConfig
     retry: RetryConfig
     public_display: PublicDisplayConfig
     session: SessionConfig
@@ -175,6 +181,10 @@ class ConfigManager:
             **yaml_data.get("image_generation", {})
         )
 
+        video_generation_config = VideoGenerationConfig(
+            **yaml_data.get("video_generation", {})
+        )
+
         retry_config = RetryConfig(
             **yaml_data.get("retry", {})
         )
@@ -192,6 +202,7 @@ class ConfigManager:
             security=security_config,
             basic=basic_config,
             image_generation=image_generation_config,
+            video_generation=video_generation_config,
             retry=retry_config,
             public_display=public_display_config,
             session=session_config
@@ -293,6 +304,11 @@ class ConfigManager:
         return self._config.image_generation.output_format
 
     @property
+    def video_output_format(self) -> str:
+        """视频输出格式"""
+        return self._config.video_generation.output_format
+
+    @property
     def session_expire_hours(self) -> int:
         """Session过期时间（小时）"""
         return self._config.session.expire_hours
@@ -362,6 +378,10 @@ class _ConfigProxy:
     @property
     def image_generation(self):
         return config_manager.config.image_generation
+
+    @property
+    def video_generation(self):
+        return config_manager.config.video_generation
 
     @property
     def retry(self):

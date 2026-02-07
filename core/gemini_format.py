@@ -156,10 +156,19 @@ class GeminiRequestConverter:
                 text = GeminiRequestConverter._extract_text(content.parts)
                 messages.append({"role": role, "content": text})
 
-        result: Dict[str, Any] = {"model": model, "messages": messages, "stream": True}
+        target_model = model
+        gen_cfg = gemini_request.generationConfig
+        if gen_cfg and gen_cfg.responseModalities:
+            modalities = {m.upper() for m in gen_cfg.responseModalities if isinstance(m, str)}
+            if "VIDEO" in modalities:
+                target_model = "gemini-veo"
+            elif "IMAGE" in modalities:
+                target_model = "gemini-imagen"
 
-        if gemini_request.generationConfig and gemini_request.generationConfig.temperature is not None:
-            result["temperature"] = gemini_request.generationConfig.temperature
+        result: Dict[str, Any] = {"model": target_model, "messages": messages, "stream": True}
+
+        if gen_cfg and gen_cfg.temperature is not None:
+            result["temperature"] = gen_cfg.temperature
 
         return result
 
