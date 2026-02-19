@@ -750,6 +750,16 @@ async def startup_event():
     """应用启动时初始化后台任务"""
     global global_stats
 
+    # 启动时清理 automation 截图目录（避免长期堆积占用磁盘）
+    try:
+        automation_dir = os.path.join(DATA_DIR, "automation")
+        if os.path.exists(automation_dir):
+            shutil.rmtree(automation_dir, ignore_errors=True)
+        os.makedirs(automation_dir, exist_ok=True)
+        logger.info(f"[SYSTEM] automation 目录已清理: {automation_dir}")
+    except Exception as e:
+        logger.warning(f"[SYSTEM] automation 目录清理失败: {e}")
+
     # 文件迁移逻辑：将根目录的旧文件迁移到 data 目录
     old_accounts = "accounts.json"
     if os.path.exists(old_accounts) and not os.path.exists(ACCOUNTS_FILE):
