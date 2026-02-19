@@ -289,8 +289,8 @@ class LoginService(BaseTaskService[LoginTask]):
 
         # 固定每10分钟检查一次（独立于 login_refresh_polling_seconds）
         check_interval_seconds = 600
-        # 自愈触发条件：活跃/可用账号数 < 100 且没有注册任务在运行
-        target_min_available = 100
+        # 自愈触发条件：活跃/可用账号数 < 20 且没有注册任务在运行
+        target_min_available = 20
 
         while self._is_polling:
             try:

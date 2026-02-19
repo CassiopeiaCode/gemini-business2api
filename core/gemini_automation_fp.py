@@ -129,6 +129,27 @@ class GeminiAutomationFP:
         options.set_argument("--disable-setuid-sandbox")
         options.set_argument("--disable-blink-features=AutomationControlled")
         options.set_argument("--window-size=1280,800")
+
+        # 降低内存/后台开销（对登录流程通常无副作用）
+        options.set_argument("--no-first-run")
+        options.set_argument("--no-default-browser-check")
+        options.set_argument("--disable-background-networking")
+        options.set_argument("--disable-background-timer-throttling")
+        options.set_argument("--disable-backgrounding-occluded-windows")
+        options.set_argument("--disable-renderer-backgrounding")
+        options.set_argument("--disable-sync")
+        options.set_argument("--disable-translate")
+        options.set_argument("--metrics-recording-only")
+        options.set_argument("--disable-features=TranslateUI,BlinkGenPropertyTrees")
+
+        # 可选：禁用图片加载以显著降低内存/带宽（可通过环境变量关闭）
+        #   BROWSER_DISABLE_IMAGES=1 (默认) 禁用图片
+        #   BROWSER_DISABLE_IMAGES=0 启用图片
+        if os.getenv("BROWSER_DISABLE_IMAGES", "1") == "1":
+            options.set_argument("--blink-settings=imagesEnabled=false")
+            options.set_pref("profile.managed_default_content_settings.images", 2)
+            options.set_pref("profile.default_content_setting_values.images", 2)
+
         # fingerprint-chromium 使用浏览器默认 UA，不设置自定义 UA
         # options.set_user_agent(self.user_agent)
 

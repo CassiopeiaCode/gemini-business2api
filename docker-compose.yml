@@ -2,6 +2,21 @@ services:
   gemini-api:
     build: .
     init: true
+
+    # CPU 限制（按需二选一）
+    # 1) 推荐（docker compose 常用）：直接使用 cpus
+    #    - "1.0" 约等于 1 个 CPU 核心；"0.5" 约等于半个核心
+    #    - 注意：字符串写法更稳妥，避免 YAML/浮点解析差异
+    # cpus: "1.0"
+    #
+    # 2) Swarm/兼容写法：deploy.resources.limits.cpus
+    #    - 在 Swarm 模式（docker stack deploy）生效
+    #    - 部分 docker compose 版本也会接受该字段，但不保证所有环境都强制执行
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: "1.0"
+
     ports:
       - "7860:7860"
     volumes:
