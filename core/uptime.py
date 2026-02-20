@@ -4,7 +4,7 @@ Uptime 实时监控与心跳历史持久化。
 
 from collections import deque
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 import json
 import os
 from threading import Lock
@@ -28,9 +28,20 @@ SERVICES = {
     "gemini-2.5-pro": {"name": "Gemini 2.5 Pro", "heartbeats": deque(maxlen=MAX_HEARTBEATS)},
     "gemini-3-flash-preview": {"name": "Gemini 3 Flash Preview", "heartbeats": deque(maxlen=MAX_HEARTBEATS)},
     "gemini-3-pro-preview": {"name": "Gemini 3 Pro Preview", "heartbeats": deque(maxlen=MAX_HEARTBEATS)},
+    "gemini-3.1-pro-preview": {"name": "Gemini 3.1 Pro Preview", "heartbeats": deque(maxlen=MAX_HEARTBEATS)},
+    "gemini-imagen": {"name": "Gemini Imagen", "heartbeats": deque(maxlen=MAX_HEARTBEATS)},
+    "gemini-veo": {"name": "Gemini Veo", "heartbeats": deque(maxlen=MAX_HEARTBEATS)},
 }
 
-SUPPORTED_MODELS = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview", "gemini-3-pro-preview"]
+SUPPORTED_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-3-flash-preview",
+    "gemini-3-pro-preview",
+    "gemini-3.1-pro-preview",
+    "gemini-imagen",
+    "gemini-veo",
+]
 
 
 def configure_storage(path: Optional[str]) -> None:
@@ -81,7 +92,7 @@ def record_request(
     service: str,
     success: bool,
     latency_ms: Optional[int] = None,
-    status_code: Optional[int] = None
+    status_code: Optional[int] = None,
 ):
     """记录一次心跳。"""
     if service not in SERVICES:

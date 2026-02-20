@@ -59,13 +59,20 @@
 
 ## 🤖 Model Capabilities
 
-| Model ID                 | Vision | Native Web | File Multimodal | Image Gen |
-| ------------------------ | ------ | ---------- | --------------- | --------- |
-| `gemini-auto`            | ✅      | ✅          | ✅               | Optional  |
-| `gemini-2.5-flash`       | ✅      | ✅          | ✅               | Optional  |
-| `gemini-2.5-pro`         | ✅      | ✅          | ✅               | Optional  |
-| `gemini-3-flash-preview` | ✅      | ✅          | ✅               | Optional  |
-| `gemini-3-pro-preview`   | ✅      | ✅          | ✅               | Optional  |
+| Model ID                 | Vision | Native Web | File Multimodal | Image Gen | Video Gen |
+| ------------------------ | ------ | ---------- | --------------- | --------- | --------- |
+| `gemini-auto`            | ✅      | ✅          | ✅               | Optional  | -         |
+| `gemini-2.5-flash`       | ✅      | ✅          | ✅               | Optional  | -         |
+| `gemini-2.5-pro`         | ✅      | ✅          | ✅               | Optional  | -         |
+| `gemini-3-flash-preview` | ✅      | ✅          | ✅               | Optional  | -         |
+| `gemini-3-pro-preview`   | ✅      | ✅          | ✅               | Optional  | -         |
+| `gemini-3.1-pro-preview` | ✅      | ✅          | ✅               | Optional  | -         |
+| `gemini-imagen`          | ✅      | ✅          | ✅               | ✅         | -         |
+| `gemini-veo`             | ✅      | ✅          | ✅               | -         | ✅         |
+
+**Virtual Models**:
+- `gemini-imagen`: Dedicated image generation model with forced image generation capability
+- `gemini-veo`: Dedicated video generation model with forced video generation capability
 
 ## 🚀 Quick Start
 
@@ -244,6 +251,3 @@ Thanks to [PR #9](https://github.com/Dreamy-rain/gemini-business2api/pull/9) for
 [![Star History Chart](https://api.star-history.com/svg?repos=Dreamy-rain/gemini-business2api&type=date&legend=top-left)](https://www.star-history.com/#Dreamy-rain/gemini-business2api&type=date&legend=top-left)
 
 **If this project helps you, please give it a ⭐ Star!**
-
-
-
