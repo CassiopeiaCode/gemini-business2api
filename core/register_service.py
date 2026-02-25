@@ -63,7 +63,7 @@ class RegisterService(BaseTaskService[RegisterTask]):
                 raise ValueError("ACCOUNTS_CONFIG is set; register is disabled")
             if self._current_task_id:
                 current = self._tasks.get(self._current_task_id)
-                if current and current.status == TaskStatus.RUNNING:
+                if current and current.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
                     raise ValueError("register task already running")
 
             domain_value = (domain or "").strip()
@@ -73,6 +73,8 @@ class RegisterService(BaseTaskService[RegisterTask]):
             register_count = count or config.basic.register_default_count
             register_count = max(1, int(register_count))
             task = RegisterTask(id=str(uuid.uuid4()), count=register_count)
+            # 在创建时就标记为 running，避免 create_task 调度前的并发窗口导致多开
+            task.status = TaskStatus.RUNNING
             self._tasks[task.id] = task
             self._current_task_id = task.id
             self._append_log(task, "info", f"register task created (count={register_count})")
@@ -81,29 +83,31 @@ class RegisterService(BaseTaskService[RegisterTask]):
 
     async def _run_register_async(self, task: RegisterTask, domain: Optional[str]) -> None:
         """异步执行注册任务"""
-        task.status = TaskStatus.RUNNING
         loop = asyncio.get_running_loop()
         self._append_log(task, "info", "register task started")
 
-        for _ in range(task.count):
-            try:
-                result = await loop.run_in_executor(self._executor, self._register_one, domain, task)
-            except Exception as exc:
-                result = {"success": False, "error": str(exc)}
-            task.progress += 1
-            task.results.append(result)
+        try:
+            for _ in range(task.count):
+                try:
+                    result = await loop.run_in_executor(self._executor, self._register_one, domain, task)
+                except Exception as exc:
+                    result = {"success": False, "error": str(exc)}
+                task.progress += 1
+                task.results.append(result)
 
-            if result.get("success"):
-                task.success_count += 1
-                self._append_log(task, "info", f"register success: {result.get('email')}")
-            else:
-                task.fail_count += 1
-                self._append_log(task, "error", f"register failed: {result.get('error')}")
-
-        task.status = TaskStatus.SUCCESS if task.fail_count == 0 else TaskStatus.FAILED
-        task.finished_at = time.time()
-        self._current_task_id = None
-        self._append_log(task, "info", f"register task finished ({task.success_count}/{task.count})")
+                if result.get("success"):
+                    task.success_count += 1
+                    self._append_log(task, "info", f"register success: {result.get('email')}")
+                else:
+                    task.fail_count += 1
+                    self._append_log(task, "error", f"register failed: {result.get('error')}")
+        finally:
+            task.status = TaskStatus.SUCCESS if task.fail_count == 0 else TaskStatus.FAILED
+            task.finished_at = time.time()
+            async with self._lock:
+                if self._current_task_id == task.id:
+                    self._current_task_id = None
+            self._append_log(task, "info", f"register task finished ({task.success_count}/{task.count})")
 
     def _register_one(self, domain: Optional[str], task: RegisterTask) -> dict:
         """注册单个账户"""

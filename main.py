@@ -1245,7 +1245,10 @@ async def admin_update_config(request: Request, accounts_data: list = Body(...))
 async def admin_start_register(request: Request, count: Optional[int] = Body(default=None), domain: Optional[str] = Body(default=None)):
     if not register_service:
         raise HTTPException(503, "register service unavailable")
-    task = await register_service.start_register(count=count, domain=domain)
+    try:
+        task = await register_service.start_register(count=count, domain=domain)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
     return task.to_dict()
 
 @app.get("/admin/register/task/{task_id}")
