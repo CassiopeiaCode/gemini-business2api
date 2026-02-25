@@ -7,8 +7,24 @@ sleep 1
 export DISPLAY=:99
 
 # ========== 启动 Python 应用 ==========
-nice -n 19 python -u main.py &
+python -u main.py &
 APP_PID=$!
+
+# ========== 浏览器进程降优先级 ==========
+renice_browser_processes() {
+  if ! command -v renice >/dev/null 2>&1; then
+    return
+  fi
+
+  PIDS="$(pgrep -f 'chrome|chromium|chromedriver' || true)"
+  if [ -z "$PIDS" ]; then
+    return
+  fi
+
+  for pid in $PIDS; do
+    renice -n 19 -p "$pid" >/dev/null 2>&1 || true
+  done
+}
 
 # ========== health 监控 ==========
 HEALTH_URL="http://localhost:7860/health"
@@ -19,6 +35,8 @@ FAIL_COUNT=0
 echo "[watchdog] start health checking..."
 
 while true; do
+  renice_browser_processes
+
   if curl -fs "$HEALTH_URL" > /dev/null; then
     FAIL_COUNT=0
   else
