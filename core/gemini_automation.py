@@ -410,11 +410,14 @@ class GeminiAutomation:
 
     def _wait_for_business_params(self, page, timeout: int = 30) -> bool:
         """等待业务页面参数生成（csesidx 和 cid）"""
-        for _ in range(timeout):
+        self._log("info", f"waiting business params (timeout={timeout}s)")
+        for i in range(timeout):
             url = page.url
             if "csesidx=" in url and "/cid/" in url:
                 self._log("info", f"business params ready: {url}")
                 return True
+            if i % 5 == 4:
+                self._log("info", f"business params not ready yet ({i + 1}/{timeout}s), current_url={url}")
             time.sleep(1)
         return False
 
@@ -425,20 +428,25 @@ class GeminiAutomation:
         if "auth.business.gemini.google/login" in current_url:
             return False
 
+        self._log("info", "entering fullName onboarding flow")
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
             username_input = None
+            self._log("info", f"fullName submit attempt {attempt}/{max_attempts}")
 
             # 等待 fullName 输入框出现并可交互
-            for _ in range(30):
+            for i in range(30):
                 try:
                     el = page.ele("css:input[formcontrolname='fullName']", timeout=1)
                     if el:
                         el.click()
                         username_input = el
+                        self._log("info", "fullName input found and interactable")
                         break
                 except Exception:
                     pass
+                if i % 5 == 4:
+                    self._log("info", f"waiting fullName input... ({i + 1}/30s)")
                 time.sleep(1)
 
             if not username_input:
@@ -481,8 +489,10 @@ class GeminiAutomation:
                         pass
 
                 if submit_btn:
+                    self._log("info", "clicking onboarding submit button")
                     submit_btn.click()
                 else:
+                    self._log("info", "submit button not found, fallback to ENTER")
                     username_input.input("\n")
 
                 time.sleep(5)
@@ -497,10 +507,12 @@ class GeminiAutomation:
                 still_has_fullname = False
 
             if not still_has_fullname:
+                self._log("info", "onboarding fullName form submitted successfully")
                 return True
 
             self._log("warning", f"fullName input still present after submit, retry {attempt}/{max_attempts}")
 
+        self._log("warning", "onboarding fullName flow exhausted retries")
         return False
 
     def _extract_config(self, page, email: str) -> dict:
