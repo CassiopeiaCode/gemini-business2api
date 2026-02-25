@@ -480,52 +480,83 @@ class GeminiAutomationFP:
         if "auth.business.gemini.google/login" in current_url:
             return False
 
-        selectors = [
-            "css:input[type='text']",
-            "css:input[name='displayName']",
-            "css:input[aria-label*='用户名' i]",
-            "css:input[aria-label*='display name' i]",
-        ]
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            username_input = None
 
-        username_input = None
-        for selector in selectors:
+            # 等待 fullName 输入框出现并可交互
+            for _ in range(30):
+                try:
+                    el = page.ele("css:input[formcontrolname='fullName']", timeout=1)
+                    if el:
+                        el.click()
+                        username_input = el
+                        break
+                except Exception:
+                    pass
+                time.sleep(1)
+
+            if not username_input:
+                self._log("warning", "fullName input not found or not interactable")
+                return False
+
+            suffix = "".join(random.choices(string.ascii_letters + string.digits, k=3))
+            username = f"Test{suffix}"
+
             try:
-                username_input = page.ele(selector, timeout=2)
-                if username_input:
-                    break
+                username_input.clear()
+                username_input.input(username)
+                time.sleep(0.3)
+
+                # 显式触发表单事件，确保前端状态同步
+                try:
+                    page.run_js(
+                        """
+                        const el = document.querySelector("input[formcontrolname='fullName']");
+                        if (el) {
+                          el.dispatchEvent(new Event('input', { bubbles: true }));
+                          el.dispatchEvent(new Event('change', { bubbles: true }));
+                          el.blur();
+                        }
+                        """
+                    )
+                except Exception:
+                    pass
+
+                submit_btn = page.ele("css:button.agree-button", timeout=3)
+                if not submit_btn:
+                    try:
+                        buttons = page.eles("tag:button")
+                        for btn in buttons:
+                            text = (btn.text or "").strip().lower()
+                            if any(kw in text for kw in ["同意并开始使用", "开始使用", "agree", "start"]):
+                                submit_btn = btn
+                                break
+                    except Exception:
+                        pass
+
+                if submit_btn:
+                    submit_btn.click()
+                else:
+                    username_input.input("\n")
+
+                time.sleep(5)
+            except Exception as e:
+                self._log("warning", f"username submit attempt {attempt} failed: {e}")
+
+            # 提交后检查 fullName 输入框是否还在；若还在则最多重试 3 次
+            still_has_fullname = False
+            try:
+                still_has_fullname = bool(page.ele("css:input[formcontrolname='fullName']", timeout=2))
             except Exception:
-                continue
+                still_has_fullname = False
 
-        if not username_input:
-            return False
+            if not still_has_fullname:
+                return True
 
-        suffix = "".join(random.choices(string.ascii_letters + string.digits, k=3))
-        username = f"Test{suffix}"
+            self._log("warning", f"fullName input still present after submit, retry {attempt}/{max_attempts}")
 
-        try:
-            username_input.click()
-            time.sleep(0.2)
-            username_input.clear()
-            username_input.input(username)
-            time.sleep(0.3)
-
-            buttons = page.eles("tag:button")
-            submit_btn = None
-            for btn in buttons:
-                text = (btn.text or "").strip().lower()
-                if any(kw in text for kw in ["确认", "提交", "继续", "submit", "continue", "confirm", "save", "保存", "下一步", "next"]):
-                    submit_btn = btn
-                    break
-
-            if submit_btn:
-                submit_btn.click()
-            else:
-                username_input.input("\n")
-
-            time.sleep(5)
-            return True
-        except Exception:
-            return False
+        return False
 
     def _extract_config(self, page, email: str) -> dict:
         """提取配置"""
@@ -564,12 +595,28 @@ class GeminiAutomationFP:
             return {"success": False, "error": str(e)}
 
     def _save_screenshot(self, page, name: str) -> None:
-        """保存截图"""
+        """保存截图和全量DOM"""
         try:
             screenshot_dir = os.path.join("data", "automation")
             os.makedirs(screenshot_dir, exist_ok=True)
-            path = os.path.join(screenshot_dir, f"{name}_{int(time.time())}.png")
-            page.get_screenshot(path=path)
+            ts = int(time.time())
+            image_path = os.path.join(screenshot_dir, f"{name}_{ts}.png")
+            dom_path = os.path.join(screenshot_dir, f"{name}_{ts}.html")
+            page.get_screenshot(path=image_path)
+
+            dom_text = ""
+            try:
+                dom_text = page.html or ""
+            except Exception:
+                dom_text = ""
+            if not dom_text:
+                try:
+                    dom_text = page.run_js("return document.documentElement.outerHTML;") or ""
+                except Exception:
+                    dom_text = ""
+            if dom_text:
+                with open(dom_path, "w", encoding="utf-8") as f:
+                    f.write(dom_text)
         except Exception:
             pass
 

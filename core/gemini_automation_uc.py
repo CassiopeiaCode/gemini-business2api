@@ -459,13 +459,24 @@ class GeminiAutomationUC:
             return {"success": False, "error": str(e)}
 
     def _save_screenshot(self, name: str) -> None:
-        """保存截图"""
+        """保存截图和全量DOM"""
         try:
             import os
             screenshot_dir = os.path.join("data", "automation")
             os.makedirs(screenshot_dir, exist_ok=True)
-            path = os.path.join(screenshot_dir, f"{name}_{int(time.time())}.png")
-            self.driver.save_screenshot(path)
+            ts = int(time.time())
+            image_path = os.path.join(screenshot_dir, f"{name}_{ts}.png")
+            dom_path = os.path.join(screenshot_dir, f"{name}_{ts}.html")
+            self.driver.save_screenshot(image_path)
+
+            dom_text = ""
+            try:
+                dom_text = self.driver.page_source or ""
+            except Exception:
+                dom_text = ""
+            if dom_text:
+                with open(dom_path, "w", encoding="utf-8") as f:
+                    f.write(dom_text)
         except Exception:
             pass
 
