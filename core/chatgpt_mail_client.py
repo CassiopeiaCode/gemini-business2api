@@ -248,15 +248,18 @@ class ChatGPTMailClient:
             self.email = first_email
             domain = _extract_domain(first_email)
 
-            # 如果该邮箱后缀历史成功率位于后半区：刷新一次（刷新后不再检查）
-            if domain and should_refresh_once_for_domain(domain):
-                self._log("info", f"domain '{domain}' success-rate ranked low; refreshing once")
+            # 如果该邮箱后缀历史成功率位于后半区：刷新并重新判定，最多刷新 3 次
+            refresh_count = 0
+            while domain and should_refresh_once_for_domain(domain) and refresh_count < 3:
+                refresh_count += 1
+                self._log("info", f"domain '{domain}' success-rate ranked low; refreshing ({refresh_count}/3)")
                 refreshed_email = _generate_email_once()
-                if refreshed_email:
-                    self.email = refreshed_email
-                    self._log("info", f"ChatGPT Mail 获取邮箱成功(刷新后): {self.email}")
-                    return True
-                self._log("warning", "refresh failed; keeping original email")
+                if not refreshed_email:
+                    self._log("warning", "refresh failed; keeping current email")
+                    break
+                self.email = refreshed_email
+                domain = _extract_domain(refreshed_email)
+                self._log("info", f"ChatGPT Mail 获取邮箱成功(刷新后): {self.email}")
 
             self._log("info", f"ChatGPT Mail 获取邮箱成功: {self.email}")
             return True
