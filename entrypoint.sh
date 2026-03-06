@@ -26,6 +26,21 @@ renice_browser_processes() {
   done
 }
 
+renice_python_processes() {
+  if ! command -v renice >/dev/null 2>&1; then
+    return
+  fi
+
+  PIDS="$(pgrep -f 'python' || true)"
+  if [ -z "$PIDS" ]; then
+    return
+  fi
+
+  for pid in $PIDS; do
+    renice -n 19 -p "$pid" >/dev/null 2>&1 || true
+  done
+}
+
 # ========== health 监控 ==========
 HEALTH_URL="http://localhost:7860/health"
 INTERVAL=10
@@ -36,7 +51,8 @@ echo "[watchdog] start health checking..."
 
 while true; do
   renice_browser_processes
-
+  renice_python_processes
+  
   if curl -fs "$HEALTH_URL" > /dev/null; then
     FAIL_COUNT=0
   else
