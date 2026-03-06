@@ -1381,6 +1381,7 @@ async def admin_get_settings(request: Request):
             "duckmail_api_key": config.basic.duckmail_api_key,
             "duckmail_verify_ssl": config.basic.duckmail_verify_ssl,
             "chatgpt_mail_base_url": config.basic.chatgpt_mail_base_url,
+            "chatgpt_mail_api_key": getattr(config.basic, "chatgpt_mail_api_key", ""),
             "browser_engine": config.basic.browser_engine,
             "browser_headless": config.basic.browser_headless,
             "fp_chrome_path": config.basic.fp_chrome_path,
@@ -1432,6 +1433,7 @@ async def admin_update_settings(request: Request, new_settings: dict = Body(...)
         basic.setdefault("duckmail_api_key", config.basic.duckmail_api_key)
         basic.setdefault("duckmail_verify_ssl", config.basic.duckmail_verify_ssl)
         basic.setdefault("chatgpt_mail_base_url", config.basic.chatgpt_mail_base_url)
+        basic.setdefault("chatgpt_mail_api_key", getattr(config.basic, "chatgpt_mail_api_key", ""))
         basic.setdefault("browser_engine", config.basic.browser_engine)
         basic.setdefault("browser_headless", config.basic.browser_headless)
         basic.setdefault("fp_chrome_path", config.basic.fp_chrome_path)

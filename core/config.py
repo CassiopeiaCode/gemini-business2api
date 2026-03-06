@@ -52,6 +52,7 @@ class BasicConfig(BaseModel):
     duckmail_api_key: str = Field(default="", description="DuckMail API key")
     duckmail_verify_ssl: bool = Field(default=True, description="DuckMail SSL校验")
     chatgpt_mail_base_url: str = Field(default="https://mail.chatgpt.org.uk", description="ChatGPT Mail API地址")
+    chatgpt_mail_api_key: str = Field(default="", description="ChatGPT Mail (GPTMail) API key")
     browser_engine: str = Field(default="dp", description="浏览器引擎：dp、uc 或 fp（fingerprint-chromium）")
     browser_headless: bool = Field(default=False, description="自动化浏览器无头模式")
     fp_chrome_path: str = Field(default="", description="fingerprint-chromium 可执行文件路径（留空则自动检测）")
@@ -157,6 +158,7 @@ class ConfigManager:
         register_default_raw = basic_data.get("register_default_count", 1)
         register_domain_raw = basic_data.get("register_domain", "")
         duckmail_api_key_raw = basic_data.get("duckmail_api_key", "")
+        chatgpt_mail_api_key_raw = basic_data.get("chatgpt_mail_api_key", "")
 
         basic_config = BasicConfig(
             api_key=basic_data.get("api_key") or "",
@@ -168,6 +170,7 @@ class ConfigManager:
             duckmail_api_key=str(duckmail_api_key_raw or "").strip(),
             duckmail_verify_ssl=_parse_bool(basic_data.get("duckmail_verify_ssl"), True),
             chatgpt_mail_base_url=basic_data.get("chatgpt_mail_base_url") or "https://mail.chatgpt.org.uk",
+            chatgpt_mail_api_key=str(chatgpt_mail_api_key_raw or "").strip(),
             browser_engine=basic_data.get("browser_engine") or "dp",
             browser_headless=_parse_bool(basic_data.get("browser_headless"), False),
             fp_chrome_path=basic_data.get("fp_chrome_path") or "",

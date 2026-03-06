@@ -149,6 +149,7 @@ class LoginService(BaseTaskService[LoginTask]):
             # ChatGPT Mail: 不需要密码，只需要邮箱地址
             client = ChatGPTMailClient(
                 base_url=config.basic.chatgpt_mail_base_url,
+                api_key=getattr(config.basic, "chatgpt_mail_api_key", ""),
                 proxy=mail_proxy,
                 verify_ssl=True,
                 log_callback=log_cb,
@@ -289,8 +290,8 @@ class LoginService(BaseTaskService[LoginTask]):
 
         # 固定每10分钟检查一次（独立于 login_refresh_polling_seconds）
         check_interval_seconds = 600
-        # 自愈触发条件：活跃/可用账号数 < 20 且没有注册任务在运行
-        target_min_available = 20
+        # 自愈触发条件：活跃/可用账号数 < 60 且没有注册任务在运行
+        target_min_available = 60
 
         while self._is_polling:
             try:

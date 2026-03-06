@@ -136,6 +136,13 @@
                     class="w-full rounded-2xl border border-input bg-background px-3 py-2 text-sm"
                     placeholder="https://mail.chatgpt.org.uk"
                   />
+                  <label class="block text-xs text-muted-foreground">GPTMail API Key</label>
+                  <input
+                    v-model="localSettings.basic.chatgpt_mail_api_key"
+                    type="text"
+                    class="w-full rounded-2xl border border-input bg-background px-3 py-2 text-sm"
+                    placeholder="gpt-test / your-key"
+                  />
                 </template>
                 <div class="flex items-center justify-between gap-2 text-xs text-muted-foreground">
                   <span>过期刷新窗口（小时）</span>
@@ -344,6 +351,9 @@ watch(settings, (value) => {
   next.basic.chatgpt_mail_base_url = typeof next.basic.chatgpt_mail_base_url === 'string'
     ? next.basic.chatgpt_mail_base_url
     : 'https://mail.chatgpt.org.uk'
+  next.basic.chatgpt_mail_api_key = typeof next.basic.chatgpt_mail_api_key === 'string'
+    ? next.basic.chatgpt_mail_api_key
+    : ''
   next.retry = next.retry || {}
   next.retry.auto_refresh_accounts_seconds = Number.isFinite(next.retry.auto_refresh_accounts_seconds)
     ? next.retry.auto_refresh_accounts_seconds

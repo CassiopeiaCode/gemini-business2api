@@ -124,6 +124,7 @@ class RegisterService(BaseTaskService[RegisterTask]):
             # 使用 ChatGPT Mail 客户端
             client = ChatGPTMailClient(
                 base_url=config.basic.chatgpt_mail_base_url,
+                api_key=getattr(config.basic, "chatgpt_mail_api_key", ""),
                 proxy=mail_proxy,
                 verify_ssl=True,
                 log_callback=log_cb,

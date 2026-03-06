@@ -4,7 +4,7 @@ WORKDIR /app/frontend
 
 # 先复制 package 文件利用 Docker 缓存
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm install --silent
+RUN npm ci --silent
 
 # 复制前端源码并构建
 COPY frontend/ ./

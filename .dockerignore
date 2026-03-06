@@ -1,0 +1,19 @@
+.git
+.github
+__pycache__
+**/__pycache__/
+*.pyc
+.pytest_cache
+.mypy_cache
+
+# Local data / env
+.env
+data/
+
+# Frontend deps/build caches (prevent Windows perms from breaking tsc)
+frontend/node_modules/
+frontend/.vite/
+
+# OS junk
+Thumbs.db
+Desktop.ini

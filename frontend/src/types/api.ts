@@ -60,6 +60,7 @@ export interface Settings {
     duckmail_api_key?: string
     duckmail_verify_ssl?: boolean
     chatgpt_mail_base_url?: string
+    chatgpt_mail_api_key?: string
     browser_engine?: string
     browser_headless?: boolean
     fp_chrome_path?: string

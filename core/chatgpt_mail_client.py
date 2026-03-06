@@ -15,6 +15,9 @@ class ChatGPTMailClient:
         base_url: str = "https://mail.chatgpt.org.uk",
         proxy: str = "",
         verify_ssl: bool = True,
+        api_key: str = "",
+        gm_sid: Optional[str] = None,
+        inbox_token: Optional[str] = None,
         log_callback=None,
     ) -> None:
         self.home_url = base_url.rstrip("/")
@@ -22,9 +25,24 @@ class ChatGPTMailClient:
         self.verify_ssl = verify_ssl
         self.proxies = {"http": proxy, "https": proxy} if proxy else None
         self.log_callback = log_callback
+        self.api_key = (api_key or "").strip()
 
         self.email: Optional[str] = None
+        # 近期版本 API 会在响应体里返回 auth.token / expires_at；用于后续请求鉴权
+        self.inbox_token: Optional[str] = None
+        self.token_expires_at: Optional[int] = None
+        self.auth_email: Optional[str] = None
         self.session = requests.Session()  # 使用 Session 自动管理 Cookie
+
+        # 允许外部注入浏览器会话 cookie/token（用于绕过 Browser session required）
+        if isinstance(gm_sid, str) and gm_sid.strip():
+            try:
+                self.session.cookies.set("gm_sid", gm_sid.strip(), domain="mail.chatgpt.org.uk", path="/")
+            except Exception:
+                # 兜底：不带 domain
+                self.session.cookies.set("gm_sid", gm_sid.strip())
+        if isinstance(inbox_token, str) and inbox_token.strip():
+            self.inbox_token = inbox_token.strip()
         
         # 通用请求头
         self.common_headers = {
@@ -40,11 +58,56 @@ class ChatGPTMailClient:
         """设置邮箱凭证（此服务不需要密码）"""
         self.email = email
 
+    def _update_auth_from_json(self, payload: dict) -> None:
+        """从响应 JSON 中提取 auth 信息（若存在）"""
+        try:
+            auth = payload.get("auth") if isinstance(payload, dict) else None
+            if not isinstance(auth, dict):
+                return
+            token = auth.get("token")
+            if isinstance(token, str) and token.strip():
+                self.inbox_token = token.strip()
+            expires_at = auth.get("expires_at")
+            if isinstance(expires_at, int):
+                self.token_expires_at = expires_at
+            email = auth.get("email")
+            if isinstance(email, str) and email.strip():
+                self.auth_email = email.strip()
+        except Exception:
+            return
+
+    def _try_update_auth_from_response(self, res: requests.Response) -> None:
+        """尽力从响应里更新 auth（不影响主流程）"""
+        try:
+            ct = (res.headers.get("content-type") or "").lower()
+            if "application/json" not in ct:
+                return
+            if not res.content:
+                return
+            payload = res.json()
+            if isinstance(payload, dict):
+                self._update_auth_from_json(payload)
+        except Exception:
+            return
+
     def _request(self, method: str, url: str, **kwargs) -> requests.Response:
         """发送请求并打印详细日志"""
         headers = kwargs.pop("headers", None) or {}
         # 合并通用请求头
         headers = {**self.common_headers, **headers}
+
+        # GPTMail v1 公共 API：优先使用 X-API-Key 鉴权（若提供）
+        if self.api_key:
+            if "X-API-Key" not in headers and "x-api-key" not in headers:
+                headers["X-API-Key"] = self.api_key
+
+        # 近期版本：服务端可能支持/要求 token 鉴权；在已获取 token 后自动携带
+        # 兼容策略：不覆盖调用方显式传入的 Authorization / X-Inbox-Token
+        if self.inbox_token:
+            if "Authorization" not in headers and "authorization" not in headers:
+                headers["Authorization"] = f"Bearer {self.inbox_token}"
+            if "X-Inbox-Token" not in headers and "x-inbox-token" not in headers:
+                headers["X-Inbox-Token"] = self.inbox_token
         kwargs["headers"] = headers
         
         self._log("info", f"[HTTP] {method} {url}")
@@ -66,6 +129,9 @@ class ChatGPTMailClient:
                     self._log("info", f"[HTTP] Response body: {res.text[:500]}")
                 except Exception:
                     pass
+
+            # 从响应中提取 auth.token/expires_at（若存在），用于后续请求
+            self._try_update_auth_from_response(res)
             return res
         except Exception as e:
             self._log("error", f"[HTTP] Request failed: {e}")
@@ -77,11 +143,19 @@ class ChatGPTMailClient:
             self._log("info", "正在预热 (获取 Cookie)...")
             headers = {
                 **self.common_headers,
-                "Upgrade-Insecure-Requests": "1"
+                "Upgrade-Insecure-Requests": "1",
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "cache-control": "no-cache",
+                "pragma": "no-cache",
             }
             res = self._request("GET", self.home_url, headers=headers)
             if res.status_code == 200:
-                self._log("info", "预热成功")
+                # 新版可能要求 gm_sid（浏览器会话）
+                gm_sid = self.session.cookies.get("gm_sid")
+                if gm_sid:
+                    self._log("info", "预热成功 (gm_sid 已获取)")
+                else:
+                    self._log("warning", "预热成功但未获取到 gm_sid，后续 API 可能返回 Browser session required")
                 return True
         except Exception as e:
             self._log("error", f"预热失败: {e}")
@@ -90,6 +164,22 @@ class ChatGPTMailClient:
         self._log("error", "预热失败")
         return False
 
+    def _preflight_auth(self) -> None:
+        """预取 auth token（若服务端已启用 token 鉴权）"""
+        try:
+            if self.inbox_token:
+                return
+            res = self._request("GET", f"{self.base_url}/stats", headers={"accept": "*/*"})
+            if res.status_code == 200:
+                try:
+                    data = res.json() if res.content else {}
+                    if isinstance(data, dict):
+                        self._update_auth_from_json(data)
+                except Exception:
+                    return
+        except Exception:
+            return
+        
     def register_account(self) -> bool:
         """获取临时邮箱地址"""
         try:
@@ -97,6 +187,9 @@ class ChatGPTMailClient:
             if not self.warm_up():
                 self._log("error", "预热失败，无法获取邮箱")
                 return False
+
+            # 近期版本：先访问 /stats 以获取 auth.token（若已启用）
+            self._preflight_auth()
 
             self._log("info", "正在申请临时邮箱...")
             headers = {
@@ -110,8 +203,26 @@ class ChatGPTMailClient:
                 headers=headers
             )
             
+            if res.status_code == 401:
+                try:
+                    payload = res.json() if res.content else {}
+                except Exception:
+                    payload = {}
+                err = payload.get("error") if isinstance(payload, dict) else None
+                if isinstance(err, str) and "Browser session required" in err:
+                    gm_sid = self.session.cookies.get("gm_sid")
+                    self._log(
+                        "error",
+                        "服务端要求浏览器会话 (Browser session required)。"
+                        f"当前 gm_sid={'set' if gm_sid else 'missing'}，"
+                        f"inbox_token={'set' if self.inbox_token else 'missing'}。"
+                        "可从浏览器抓包注入 gm_sid / X-Inbox-Token 后重试。",
+                    )
+
             if res.status_code == 200:
                 data = res.json() if res.content else {}
+                if isinstance(data, dict):
+                    self._update_auth_from_json(data)
                 if data.get("success") and data.get("data") and data["data"].get("email"):
                     self.email = data["data"]["email"]
                     self._log("info", f"ChatGPT Mail 获取邮箱成功: {self.email}")
@@ -148,6 +259,8 @@ class ChatGPTMailClient:
             if res.status_code == 200:
                 try:
                     data = res.json() if res.content else {}
+                    if isinstance(data, dict):
+                        self._update_auth_from_json(data)
                     if data.get("success") and data.get("data"):
                         emails = data["data"].get("emails", [])
                         if emails:
