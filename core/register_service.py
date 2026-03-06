@@ -11,6 +11,8 @@ from core.base_task_service import BaseTask, BaseTaskService, TaskStatus
 from core.config import config
 from core.duckmail_client import DuckMailClient
 from core.chatgpt_mail_client import ChatGPTMailClient
+from core.gptmail_domain_counter import increment_attempt as gptmail_increment_attempt
+from core.gptmail_domain_counter import increment_success as gptmail_increment_success
 from core.gemini_automation import GeminiAutomation
 from core.gemini_automation_uc import GeminiAutomationUC
 from core.gemini_automation_fp import GeminiAutomationFP
@@ -179,11 +181,18 @@ class RegisterService(BaseTaskService[RegisterTask]):
             )
 
         try:
+            # 仅在使用 GPTMail（chatgpt_mail）注册时统计：开始把邮箱用于浏览器注册 => attempts++
+            if mail_provider_name == "chatgpt_mail" and client.email:
+                gptmail_increment_attempt(client.email)
             result = automation.login_and_extract(client.email, client)
         except Exception as exc:
             return {"success": False, "error": str(exc)}
         if not result.get("success"):
             return {"success": False, "error": result.get("error", "automation failed")}
+
+        # 成功完成注册流程后：success++（失败不加）
+        if mail_provider_name == "chatgpt_mail" and client.email:
+            gptmail_increment_success(client.email)
 
         config_data = result["config"]
         config_data["mail_provider"] = mail_provider_name

@@ -5,6 +5,7 @@ from datetime import datetime
 import requests
 
 from core.mail_utils import extract_verification_code
+from core.gptmail_domain_counter import should_refresh_once_for_domain
 
 
 class ChatGPTMailClient:
@@ -182,51 +183,83 @@ class ChatGPTMailClient:
         
     def register_account(self) -> bool:
         """获取临时邮箱地址"""
+        def _extract_domain(email: str) -> str:
+            try:
+                return (email.rsplit("@", 1)[-1] or "").strip().lower()
+            except Exception:
+                return ""
+
+        def _generate_email_once() -> Optional[str]:
+            try:
+                # 先预热
+                if not self.warm_up():
+                    self._log("error", "预热失败，无法获取邮箱")
+                    return None
+
+                # 近期版本：先访问 /stats 以获取 auth.token（若已启用）
+                self._preflight_auth()
+
+                self._log("info", "正在申请临时邮箱...")
+                headers = {
+                    **self.common_headers,
+                    "content-type": "application/json"
+                }
+                
+                res = self._request(
+                    "GET",
+                    f"{self.base_url}/generate-email",
+                    headers=headers
+                )
+                
+                if res.status_code == 401:
+                    try:
+                        payload = res.json() if res.content else {}
+                    except Exception:
+                        payload = {}
+                    err = payload.get("error") if isinstance(payload, dict) else None
+                    if isinstance(err, str) and "Browser session required" in err:
+                        gm_sid = self.session.cookies.get("gm_sid")
+                        self._log(
+                            "error",
+                            "服务端要求浏览器会话 (Browser session required)。"
+                            f"当前 gm_sid={'set' if gm_sid else 'missing'}，"
+                            f"inbox_token={'set' if self.inbox_token else 'missing'}。"
+                            "可从浏览器抓包注入 gm_sid / X-Inbox-Token 后重试。",
+                        )
+
+                if res.status_code == 200:
+                    data = res.json() if res.content else {}
+                    if isinstance(data, dict):
+                        self._update_auth_from_json(data)
+                    if data.get("success") and data.get("data") and data["data"].get("email"):
+                        return data["data"]["email"]
+            except Exception as e:
+                self._log("error", f"ChatGPT Mail 获取邮箱失败: {e}")
+                return None
+
+            return None
+
         try:
-            # 先预热
-            if not self.warm_up():
-                self._log("error", "预热失败，无法获取邮箱")
+            first_email = _generate_email_once()
+            if not first_email:
+                self._log("error", "ChatGPT Mail 获取邮箱失败")
                 return False
 
-            # 近期版本：先访问 /stats 以获取 auth.token（若已启用）
-            self._preflight_auth()
+            self.email = first_email
+            domain = _extract_domain(first_email)
 
-            self._log("info", "正在申请临时邮箱...")
-            headers = {
-                **self.common_headers,
-                "content-type": "application/json"
-            }
-            
-            res = self._request(
-                "GET",
-                f"{self.base_url}/generate-email",
-                headers=headers
-            )
-            
-            if res.status_code == 401:
-                try:
-                    payload = res.json() if res.content else {}
-                except Exception:
-                    payload = {}
-                err = payload.get("error") if isinstance(payload, dict) else None
-                if isinstance(err, str) and "Browser session required" in err:
-                    gm_sid = self.session.cookies.get("gm_sid")
-                    self._log(
-                        "error",
-                        "服务端要求浏览器会话 (Browser session required)。"
-                        f"当前 gm_sid={'set' if gm_sid else 'missing'}，"
-                        f"inbox_token={'set' if self.inbox_token else 'missing'}。"
-                        "可从浏览器抓包注入 gm_sid / X-Inbox-Token 后重试。",
-                    )
-
-            if res.status_code == 200:
-                data = res.json() if res.content else {}
-                if isinstance(data, dict):
-                    self._update_auth_from_json(data)
-                if data.get("success") and data.get("data") and data["data"].get("email"):
-                    self.email = data["data"]["email"]
-                    self._log("info", f"ChatGPT Mail 获取邮箱成功: {self.email}")
+            # 如果该邮箱后缀历史成功率位于后半区：刷新一次（刷新后不再检查）
+            if domain and should_refresh_once_for_domain(domain):
+                self._log("info", f"domain '{domain}' success-rate ranked low; refreshing once")
+                refreshed_email = _generate_email_once()
+                if refreshed_email:
+                    self.email = refreshed_email
+                    self._log("info", f"ChatGPT Mail 获取邮箱成功(刷新后): {self.email}")
                     return True
+                self._log("warning", "refresh failed; keeping original email")
+
+            self._log("info", f"ChatGPT Mail 获取邮箱成功: {self.email}")
+            return True
         except Exception as e:
             self._log("error", f"ChatGPT Mail 获取邮箱失败: {e}")
             return False
