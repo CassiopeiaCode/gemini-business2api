@@ -110,9 +110,12 @@ def increment_success(email: str) -> Optional[Tuple[str, DomainStats]]:
 
 def should_refresh_once_for_domain(domain: str) -> bool:
     """
-    当 domain 的历史成功率位于后 50%（排名靠后的一半）时返回 True。
-    - domain 不在统计内 / 统计不足时返回 False
-    - 至少需要 >= 2 个有 attempts 的域名才判断“后半”
+    当 domain 的历史成功率位于“后半区”时返回 True（用于触发获取邮箱时刷新一次）。
+    规则：
+    - 仅统计 attempts>0 的域名
+    - 先按成功率去重（相同成功率视为同一档位），再判断是否落入后半区
+      例如：0.5 0.5 0.5 0.1 0.2 => 去重后为 [0.5, 0.2, 0.1]，则 0.1 属于后半区需要刷新，0.2/0.5 不刷新
+    - 至少需要 >= 2 个有效“成功率档位”才判断后半区；否则返回 False
     """
     domain = (domain or "").strip().lower()
     if not domain:
@@ -135,16 +138,14 @@ def should_refresh_once_for_domain(domain: str) -> bool:
     if domain not in stats:
         return False
 
-    ranked = sorted(
-        stats.items(),
-        key=lambda kv: (kv[1].success_rate, kv[1].attempts, kv[0]),
-        reverse=True,
-    )
-    rank_index = next((i for i, (d, _) in enumerate(ranked) if d == domain), None)
-    if rank_index is None:
+    domain_rate = stats[domain].success_rate
+    unique_rates = sorted({s.success_rate for s in stats.values()}, reverse=True)
+    if len(unique_rates) < 2:
         return False
 
-    # 更偏“积极刷新”：奇数时中位也算在后半
-    threshold = len(ranked) // 2
-    return rank_index >= threshold
-
+    # “小于半数”：取 floor(n/2) 个最低档位作为后半区
+    bottom_count = len(unique_rates) // 2
+    if bottom_count <= 0:
+        return False
+    bottom_rates = set(unique_rates[-bottom_count:])
+    return domain_rate in bottom_rates
