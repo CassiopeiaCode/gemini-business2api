@@ -162,6 +162,16 @@
                   max="30"
                   class="w-full rounded-2xl border border-input bg-background px-3 py-2 text-sm"
                 />
+                <Checkbox v-model="localSettings.basic.sync_enabled">
+                  启用主从账号同步
+                </Checkbox>
+                <label class="block text-xs text-muted-foreground">SYNC_SECRET</label>
+                <input
+                  v-model="localSettings.basic.sync_secret"
+                  type="text"
+                  class="w-full rounded-2xl border border-input bg-background px-3 py-2 text-sm"
+                  placeholder="sync secret"
+                />
               </div>
             </div>
 
@@ -353,6 +363,13 @@ watch(settings, (value) => {
     : 'https://mail.chatgpt.org.uk'
   next.basic.chatgpt_mail_api_key = typeof next.basic.chatgpt_mail_api_key === 'string'
     ? next.basic.chatgpt_mail_api_key
+    : ''
+  next.basic.sync_enabled = next.basic.sync_enabled ?? false
+  next.basic.sync_secret = typeof next.basic.sync_secret === 'string'
+    ? next.basic.sync_secret
+    : ''
+  next.basic.master_sync_url = typeof next.basic.master_sync_url === 'string'
+    ? next.basic.master_sync_url
     : ''
   next.retry = next.retry || {}
   next.retry.auto_refresh_accounts_seconds = Number.isFinite(next.retry.auto_refresh_accounts_seconds)

@@ -3,38 +3,28 @@ import logging
 import os
 import time
 import uuid
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
 
 from core.account import load_accounts_from_source
 from core.base_task_service import BaseTask, BaseTaskService, TaskStatus
 from core.config import config
-from core.duckmail_client import DuckMailClient
-from core.chatgpt_mail_client import ChatGPTMailClient
-from core.gptmail_domain_counter import increment_attempt as gptmail_increment_attempt
-from core.gptmail_domain_counter import increment_success as gptmail_increment_success
-from core.gemini_automation import GeminiAutomation
-from core.gemini_automation_uc import GeminiAutomationUC
-from core.gemini_automation_fp import GeminiAutomationFP
+from core.register_runner import register_one_account
 
 logger = logging.getLogger("gemini.register")
 
 
 @dataclass
 class RegisterTask(BaseTask):
-    """注册任务数据类"""
     count: int = 0
 
     def to_dict(self) -> dict:
-        """转换为字典"""
         base_dict = super().to_dict()
         base_dict["count"] = self.count
         return base_dict
 
 
 class RegisterService(BaseTaskService[RegisterTask]):
-    """注册服务类"""
-
     def __init__(
         self,
         multi_account_mgr,
@@ -59,7 +49,6 @@ class RegisterService(BaseTaskService[RegisterTask]):
         )
 
     async def start_register(self, count: Optional[int] = None, domain: Optional[str] = None) -> RegisterTask:
-        """启动注册任务"""
         async with self._lock:
             if os.environ.get("ACCOUNTS_CONFIG"):
                 raise ValueError("ACCOUNTS_CONFIG is set; register is disabled")
@@ -75,7 +64,6 @@ class RegisterService(BaseTaskService[RegisterTask]):
             register_count = count or config.basic.register_default_count
             register_count = max(1, int(register_count))
             task = RegisterTask(id=str(uuid.uuid4()), count=register_count)
-            # 在创建时就标记为 running，避免 create_task 调度前的并发窗口导致多开
             task.status = TaskStatus.RUNNING
             self._tasks[task.id] = task
             self._current_task_id = task.id
@@ -84,7 +72,6 @@ class RegisterService(BaseTaskService[RegisterTask]):
             return task
 
     async def _run_register_async(self, task: RegisterTask, domain: Optional[str]) -> None:
-        """异步执行注册任务"""
         loop = asyncio.get_running_loop()
         self._append_log(task, "info", "register task started")
 
@@ -112,97 +99,12 @@ class RegisterService(BaseTaskService[RegisterTask]):
             self._append_log(task, "info", f"register task finished ({task.success_count}/{task.count})")
 
     def _register_one(self, domain: Optional[str], task: RegisterTask) -> dict:
-        """注册单个账户"""
         log_cb = lambda level, message: self._append_log(task, level, message)
-
-        # HTTP 代理：支持逗号分隔多个代理，调用时随机选择一个；并支持 host:port:user:pass 格式
-        from core.proxy_helper import choose_random_httpx_proxy
-        mail_proxy = choose_random_httpx_proxy((config.basic.proxy or "").strip())
-        
-        # 根据配置选择邮箱提供商
-        mail_provider = (config.basic.mail_provider or "duckmail").lower()
-        
-        if mail_provider == "chatgpt":
-            # 使用 ChatGPT Mail 客户端
-            client = ChatGPTMailClient(
-                base_url=config.basic.chatgpt_mail_base_url,
-                api_key=getattr(config.basic, "chatgpt_mail_api_key", ""),
-                proxy=mail_proxy,
-                verify_ssl=True,
-                log_callback=log_cb,
-            )
-            if not client.register_account():
-                return {"success": False, "error": "chatgpt mail register failed"}
-            mail_provider_name = "chatgpt_mail"
-        else:
-            # 使用 DuckMail 客户端（默认）
-            client = DuckMailClient(
-                base_url=config.basic.duckmail_base_url,
-                proxy=mail_proxy,
-                verify_ssl=config.basic.duckmail_verify_ssl,
-                api_key=config.basic.duckmail_api_key,
-                log_callback=log_cb,
-            )
-            if not client.register_account(domain=domain):
-                return {"success": False, "error": "duckmail register failed"}
-            mail_provider_name = "duckmail"
-
-        # 浏览器代理：支持逗号分隔多个代理，启动时随机选择一个
-        from core.proxy_helper import choose_random_proxy
-        browser_proxy_raw = (config.basic.browser_proxy or "").strip() or (config.basic.proxy or "").strip()
-        browser_proxy = choose_random_proxy(browser_proxy_raw) or browser_proxy_raw
-
-        # 根据配置选择浏览器引擎
-        browser_engine = (config.basic.browser_engine or "dp").lower()
-        if browser_engine == "uc":
-            # undetected-chromedriver 引擎：支持有头和无头
-            automation = GeminiAutomationUC(
-                user_agent=self.user_agent,
-                proxy=browser_proxy,
-                headless=config.basic.browser_headless,
-                log_callback=log_cb,
-            )
-        elif browser_engine == "dp-fc" or browser_engine == "fp":
-            # DrissionPage + fingerprint-chromium 引擎
-            automation = GeminiAutomationFP(
-                user_agent=self.user_agent,
-                proxy=browser_proxy,
-                headless=config.basic.browser_headless,
-                log_callback=log_cb,
-                fp_chrome_path=config.basic.fp_chrome_path,
-            )
-        else:
-            # DrissionPage 引擎（默认）：支持有头和无头模式
-            automation = GeminiAutomation(
-                user_agent=self.user_agent,
-                proxy=browser_proxy,
-                headless=config.basic.browser_headless,
-                log_callback=log_cb,
-            )
-
-        try:
-            # 仅在使用 GPTMail（chatgpt_mail）注册时统计：开始把邮箱用于浏览器注册 => attempts++
-            if mail_provider_name == "chatgpt_mail" and client.email:
-                gptmail_increment_attempt(client.email)
-            result = automation.login_and_extract(client.email, client)
-        except Exception as exc:
-            return {"success": False, "error": str(exc)}
+        result = register_one_account(domain=domain, user_agent=self.user_agent, log_callback=log_cb)
         if not result.get("success"):
-            return {"success": False, "error": result.get("error", "automation failed")}
-
-        # 成功完成注册流程后：success++（失败不加）
-        if mail_provider_name == "chatgpt_mail" and client.email:
-            gptmail_increment_success(client.email)
+            return result
 
         config_data = result["config"]
-        config_data["mail_provider"] = mail_provider_name
-        config_data["mail_address"] = client.email
-        # ChatGPT Mail 没有密码，DuckMail 才有
-        if hasattr(client, 'password') and client.password:
-            config_data["mail_password"] = client.password
-        else:
-            config_data["mail_password"] = ""
-
         accounts_data = load_accounts_from_source()
         updated = False
         for acc in accounts_data:
@@ -215,4 +117,4 @@ class RegisterService(BaseTaskService[RegisterTask]):
 
         self._apply_accounts_update(accounts_data)
 
-        return {"success": True, "email": client.email, "config": config_data}
+        return result

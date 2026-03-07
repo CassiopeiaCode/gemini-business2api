@@ -67,6 +67,9 @@ export interface Settings {
     refresh_window_hours?: number
     register_default_count?: number
     register_domain?: string
+    sync_enabled?: boolean
+    sync_secret?: string
+    master_sync_url?: string
   }
   retry: {
     max_new_session_tries: number

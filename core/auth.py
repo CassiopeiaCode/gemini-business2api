@@ -47,6 +47,20 @@ def verify_api_key(api_key_value: str, authorization: Optional[str] = None) -> b
     return True
 
 
+def verify_sync_secret(expected_secret: str, authorization: Optional[str] = None) -> bool:
+    if not expected_secret:
+        raise HTTPException(status_code=503, detail="SYNC_SECRET is not configured")
+
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    token = authorization[7:] if authorization.startswith("Bearer ") else authorization
+    if token != expected_secret:
+        raise HTTPException(status_code=401, detail="Invalid sync secret")
+
+    return True
+
+
 def verify_gemini_api_key(
     expected_key: str,
     key_param: Optional[str] = None,

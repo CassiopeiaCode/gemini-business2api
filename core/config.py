@@ -1,27 +1,20 @@
-"""
-统一配置管理系统
-
-优先级规则：
-1. 安全配置：仅环境变量（ADMIN_KEY, SESSION_SECRET_KEY）
-2. 业务配置：YAML 配置文件 > 默认值
-
-配置分类：
-- 安全配置：仅从环境变量读取，不可热更新（ADMIN_KEY, SESSION_SECRET_KEY）
-- 业务配置：仅从 YAML 读取，支持热更新（API_KEY, BASE_URL, PROXY, 重试策略等）
+﻿"""
+Unified config management.
 """
 
 import os
-import yaml
 import secrets
 from pathlib import Path
-from typing import Optional, List
-from pydantic import BaseModel, Field, validator
+from typing import List, Optional
+
+import yaml
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field
 
 from core import storage
 
-# 加载 .env 文件
 load_dotenv()
+
 
 def _parse_bool(value, default: bool) -> bool:
     if isinstance(value, bool):
@@ -39,78 +32,65 @@ def _parse_bool(value, default: bool) -> bool:
     return default
 
 
-# ==================== 配置模型定义 ====================
-
 class BasicConfig(BaseModel):
-    """基础配置"""
-    api_key: str = Field(default="", description="API访问密钥（留空则公开访问）")
-    base_url: str = Field(default="", description="服务器URL（留空则自动检测）")
-    proxy: str = Field(default="", description="代理地址")
-    browser_proxy: str = Field(default="", description="浏览器代理地址（仅自动化浏览器使用）")
-    mail_provider: str = Field(default="duckmail", description="邮箱提供商：duckmail 或 chatgpt")
-    duckmail_base_url: str = Field(default="https://api.duckmail.sbs", description="DuckMail API地址")
+    api_key: str = Field(default="", description="API key")
+    base_url: str = Field(default="", description="Service base URL")
+    proxy: str = Field(default="", description="HTTP proxy")
+    browser_proxy: str = Field(default="", description="Browser automation proxy")
+    mail_provider: str = Field(default="duckmail", description="Mail provider")
+    duckmail_base_url: str = Field(default="https://api.duckmail.sbs", description="DuckMail API URL")
     duckmail_api_key: str = Field(default="", description="DuckMail API key")
-    duckmail_verify_ssl: bool = Field(default=True, description="DuckMail SSL校验")
-    chatgpt_mail_base_url: str = Field(default="https://mail.chatgpt.org.uk", description="ChatGPT Mail API地址")
-    chatgpt_mail_api_key: str = Field(default="", description="ChatGPT Mail (GPTMail) API key")
-    browser_engine: str = Field(default="dp", description="浏览器引擎：dp、uc 或 fp（fingerprint-chromium）")
-    browser_headless: bool = Field(default=False, description="自动化浏览器无头模式")
-    fp_chrome_path: str = Field(default="", description="fingerprint-chromium 可执行文件路径（留空则自动检测）")
-    refresh_window_hours: int = Field(default=1, ge=0, le=24, description="过期刷新窗口（小时）")
-    register_default_count: int = Field(default=1, ge=1, le=30, description="默认注册数量")
-    register_domain: str = Field(default="", description="默认注册域名（推荐）")
+    duckmail_verify_ssl: bool = Field(default=True, description="DuckMail SSL verify")
+    chatgpt_mail_base_url: str = Field(default="https://mail.chatgpt.org.uk", description="ChatGPT Mail API URL")
+    chatgpt_mail_api_key: str = Field(default="", description="ChatGPT Mail API key")
+    browser_engine: str = Field(default="dp", description="Browser engine")
+    browser_headless: bool = Field(default=False, description="Headless browser mode")
+    fp_chrome_path: str = Field(default="", description="Fingerprint Chromium path")
+    refresh_window_hours: int = Field(default=1, ge=0, le=24, description="Refresh window hours")
+    register_default_count: int = Field(default=1, ge=1, le=30, description="Default register count")
+    register_domain: str = Field(default="", description="Default register domain")
+    sync_enabled: bool = Field(default=False, description="Enable host/slave sync")
+    sync_secret: str = Field(default="", description="Host/slave sync secret")
+    master_sync_url: str = Field(default="", description="Host sync endpoint URL")
 
 
 class ImageGenerationConfig(BaseModel):
-    """图片生成配置"""
-    enabled: bool = Field(default=True, description="是否启用图片生成")
-    supported_models: List[str] = Field(
-        default=["gemini-3-pro-preview"],
-        description="支持图片生成的模型列表"
-    )
-    output_format: str = Field(default="base64", description="图片输出格式：base64 或 url")
+    enabled: bool = Field(default=True, description="Enable image generation")
+    supported_models: List[str] = Field(default=["gemini-3-pro-preview"], description="Supported models")
+    output_format: str = Field(default="base64", description="Image output format")
 
 
 class VideoGenerationConfig(BaseModel):
-    """视频生成配置"""
-    output_format: str = Field(default="html", description="视频输出格式：html、url 或 markdown")
+    output_format: str = Field(default="html", description="Video output format")
 
 
 class RetryConfig(BaseModel):
-    """重试策略配置"""
-    max_new_session_tries: int = Field(default=5, ge=1, le=20, description="新会话尝试账户数")
-    max_request_retries: int = Field(default=3, ge=1, le=10, description="请求失败重试次数")
-    max_account_switch_tries: int = Field(default=5, ge=1, le=20, description="账户切换尝试次数")
-    account_failure_threshold: int = Field(default=3, ge=1, le=1000, description="账户失败阈值")
-    rate_limit_cooldown_seconds: int = Field(default=600, ge=1, le=3600, description="429冷却时间（秒）")
-    session_cache_ttl_seconds: int = Field(default=3600, ge=0, le=86400, description="会话缓存时间（秒，0表示禁用缓存）")
-    auto_refresh_accounts_seconds: int = Field(default=60, ge=0, le=600, description="自动刷新账号间隔（秒，0禁用）")
-    login_refresh_polling_seconds: int = Field(default=1800, ge=0, le=86400, description="账户过期检查轮询间隔（秒，0禁用）")
+    max_new_session_tries: int = Field(default=5, ge=1, le=20, description="Max new session tries")
+    max_request_retries: int = Field(default=3, ge=1, le=10, description="Max request retries")
+    max_account_switch_tries: int = Field(default=5, ge=1, le=20, description="Max account switch tries")
+    account_failure_threshold: int = Field(default=3, ge=1, le=1000, description="Account failure threshold")
+    rate_limit_cooldown_seconds: int = Field(default=600, ge=1, le=3600, description="Rate limit cooldown seconds")
+    session_cache_ttl_seconds: int = Field(default=3600, ge=0, le=86400, description="Session cache TTL seconds")
+    auto_refresh_accounts_seconds: int = Field(default=60, ge=0, le=600, description="Auto refresh accounts seconds")
+    login_refresh_polling_seconds: int = Field(default=1800, ge=0, le=86400, description="Login refresh polling seconds")
 
 
 class PublicDisplayConfig(BaseModel):
-    """公开展示配置"""
     logo_url: str = Field(default="", description="Logo URL")
-    chat_url: str = Field(default="", description="开始对话链接")
+    chat_url: str = Field(default="", description="Chat URL")
 
 
 class SessionConfig(BaseModel):
-    """Session配置"""
-    expire_hours: int = Field(default=24, ge=1, le=168, description="Session过期时间（小时）")
+    expire_hours: int = Field(default=24, ge=1, le=168, description="Session expire hours")
 
 
 class SecurityConfig(BaseModel):
-    """安全配置（仅从环境变量读取，不可热更新）"""
-    admin_key: str = Field(default="", description="管理员密钥（必需）")
-    session_secret_key: str = Field(..., description="Session密钥")
+    admin_key: str = Field(default="", description="Admin key")
+    session_secret_key: str = Field(..., description="Session secret key")
 
 
 class AppConfig(BaseModel):
-    """应用配置（统一管理）"""
-    # 安全配置（仅从环境变量）
     security: SecurityConfig
-
-    # 业务配置（环境变量 > YAML > 默认值）
     basic: BasicConfig
     image_generation: ImageGenerationConfig
     video_generation: VideoGenerationConfig
@@ -119,47 +99,22 @@ class AppConfig(BaseModel):
     session: SessionConfig
 
 
-# ==================== 配置管理器 ====================
-
 class ConfigManager:
-    """配置管理器（单例）"""
-
     def __init__(self, yaml_path: str = None):
-        # 自动检测环境并设置默认路径
         if yaml_path is None:
-            if os.path.exists("/data"):
-                yaml_path = "/data/settings.yaml"  # HF Pro 持久化
-            else:
-                yaml_path = "data/settings.yaml"  # 本地存储
+            yaml_path = "/data/settings.yaml" if os.path.exists("/data") else "data/settings.yaml"
         self.yaml_path = Path(yaml_path)
         self._config: Optional[AppConfig] = None
         self.load()
 
     def load(self):
-        """
-        加载配置
-
-        优先级规则：
-        1. 安全配置（ADMIN_KEY, SESSION_SECRET_KEY）：仅从环境变量读取
-        2. 其他配置：YAML > 默认值
-        """
-        # 1. 加载 YAML 配置
         yaml_data = self._load_yaml()
-
-        # 2. 加载安全配置（仅从环境变量，不允许 Web 修改）
         security_config = SecurityConfig(
             admin_key=os.getenv("ADMIN_KEY", ""),
-            session_secret_key=os.getenv("SESSION_SECRET_KEY", self._generate_secret())
+            session_secret_key=os.getenv("SESSION_SECRET_KEY", self._generate_secret()),
         )
 
-        # 3. 加载基础配置（YAML > 默认值）
         basic_data = yaml_data.get("basic", {})
-        refresh_window_raw = basic_data.get("refresh_window_hours", 1)
-        register_default_raw = basic_data.get("register_default_count", 1)
-        register_domain_raw = basic_data.get("register_domain", "")
-        duckmail_api_key_raw = basic_data.get("duckmail_api_key", "")
-        chatgpt_mail_api_key_raw = basic_data.get("chatgpt_mail_api_key", "")
-
         basic_config = BasicConfig(
             api_key=basic_data.get("api_key") or "",
             base_url=basic_data.get("base_url") or "",
@@ -167,209 +122,158 @@ class ConfigManager:
             browser_proxy=basic_data.get("browser_proxy") or "",
             mail_provider=basic_data.get("mail_provider") or "duckmail",
             duckmail_base_url=basic_data.get("duckmail_base_url") or "https://api.duckmail.sbs",
-            duckmail_api_key=str(duckmail_api_key_raw or "").strip(),
+            duckmail_api_key=str(basic_data.get("duckmail_api_key") or "").strip(),
             duckmail_verify_ssl=_parse_bool(basic_data.get("duckmail_verify_ssl"), True),
             chatgpt_mail_base_url=basic_data.get("chatgpt_mail_base_url") or "https://mail.chatgpt.org.uk",
-            chatgpt_mail_api_key=str(chatgpt_mail_api_key_raw or "").strip(),
+            chatgpt_mail_api_key=str(basic_data.get("chatgpt_mail_api_key") or "").strip(),
             browser_engine=basic_data.get("browser_engine") or "dp",
             browser_headless=_parse_bool(basic_data.get("browser_headless"), False),
             fp_chrome_path=basic_data.get("fp_chrome_path") or "",
-            refresh_window_hours=int(refresh_window_raw),
-            register_default_count=int(register_default_raw),
-            register_domain=str(register_domain_raw or "").strip(),
+            refresh_window_hours=int(basic_data.get("refresh_window_hours", 1)),
+            register_default_count=int(basic_data.get("register_default_count", 1)),
+            register_domain=str(basic_data.get("register_domain") or "").strip(),
+            sync_enabled=_parse_bool(basic_data.get("sync_enabled"), False),
+            sync_secret=str(basic_data.get("sync_secret") or "").strip(),
+            master_sync_url=str(basic_data.get("master_sync_url") or "").strip(),
         )
 
-        # 4. 加载其他配置（从 YAML）
-        image_generation_config = ImageGenerationConfig(
-            **yaml_data.get("image_generation", {})
-        )
-
-        video_generation_config = VideoGenerationConfig(
-            **yaml_data.get("video_generation", {})
-        )
-
-        retry_config = RetryConfig(
-            **yaml_data.get("retry", {})
-        )
-
-        public_display_config = PublicDisplayConfig(
-            **yaml_data.get("public_display", {})
-        )
-
-        session_config = SessionConfig(
-            **yaml_data.get("session", {})
-        )
-
-        # 5. 构建完整配置
         self._config = AppConfig(
             security=security_config,
             basic=basic_config,
-            image_generation=image_generation_config,
-            video_generation=video_generation_config,
-            retry=retry_config,
-            public_display=public_display_config,
-            session=session_config
+            image_generation=ImageGenerationConfig(**yaml_data.get("image_generation", {})),
+            video_generation=VideoGenerationConfig(**yaml_data.get("video_generation", {})),
+            retry=RetryConfig(**yaml_data.get("retry", {})),
+            public_display=PublicDisplayConfig(**yaml_data.get("public_display", {})),
+            session=SessionConfig(**yaml_data.get("session", {})),
         )
 
     def _load_yaml(self) -> dict:
-        """加载 YAML 文件"""
         if storage.is_database_enabled():
             try:
                 data = storage.load_settings_sync()
                 if isinstance(data, dict):
                     return data
-            except Exception as e:
-                print(f"[WARN] 加载数据库设置失败: {e}，使用本地配置")
+            except Exception as exc:
+                print(f"[WARN] Failed to load settings from database: {exc}; falling back to local file")
         if self.yaml_path.exists():
             try:
-                with open(self.yaml_path, 'r', encoding='utf-8') as f:
-                    return yaml.safe_load(f) or {}
-            except Exception as e:
-                print(f"[WARN] 加载配置文件失败: {e}，使用默认配置")
+                with open(self.yaml_path, "r", encoding="utf-8") as handle:
+                    return yaml.safe_load(handle) or {}
+            except Exception as exc:
+                print(f"[WARN] Failed to load settings file: {exc}; using defaults")
         return {}
 
     def _generate_secret(self) -> str:
-        """生成随机密钥"""
         return secrets.token_urlsafe(32)
 
     def save_yaml(self, data: dict):
-        """保存 YAML 配置"""
         if storage.is_database_enabled():
             try:
                 saved = storage.save_settings_sync(data)
                 if saved:
                     return
-            except Exception as e:
-                print(f"[WARN] 保存数据库设置失败: {e}，降级到本地文件")
+            except Exception as exc:
+                print(f"[WARN] Failed to save settings to database: {exc}; falling back to local file")
         self.yaml_path.parent.mkdir(exist_ok=True)
-        with open(self.yaml_path, 'w', encoding='utf-8') as f:
-            yaml.dump(data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+        with open(self.yaml_path, "w", encoding="utf-8") as handle:
+            yaml.dump(data, handle, allow_unicode=True, default_flow_style=False, sort_keys=False)
 
     def reload(self):
-        """重新加载配置（热更新）"""
         self.load()
 
     @property
     def config(self) -> AppConfig:
-        """获取配置"""
         return self._config
-
-    # ==================== 便捷访问属性 ====================
 
     @property
     def api_key(self) -> str:
-        """API访问密钥"""
         return self._config.basic.api_key
 
     @property
     def admin_key(self) -> str:
-        """管理员密钥"""
         return self._config.security.admin_key
 
     @property
     def session_secret_key(self) -> str:
-        """Session密钥"""
         return self._config.security.session_secret_key
 
     @property
     def proxy(self) -> str:
-        """代理地址"""
         return self._config.basic.proxy
 
     @property
     def base_url(self) -> str:
-        """服务器URL"""
         return self._config.basic.base_url
 
     @property
     def logo_url(self) -> str:
-        """Logo URL"""
         return self._config.public_display.logo_url
 
     @property
     def chat_url(self) -> str:
-        """开始对话链接"""
         return self._config.public_display.chat_url
 
     @property
     def image_generation_enabled(self) -> bool:
-        """是否启用图片生成"""
         return self._config.image_generation.enabled
 
     @property
     def image_generation_models(self) -> List[str]:
-        """支持图片生成的模型列表"""
         return self._config.image_generation.supported_models
 
     @property
     def image_output_format(self) -> str:
-        """图片输出格式"""
         return self._config.image_generation.output_format
 
     @property
     def video_output_format(self) -> str:
-        """视频输出格式"""
         return self._config.video_generation.output_format
 
     @property
     def session_expire_hours(self) -> int:
-        """Session过期时间（小时）"""
         return self._config.session.expire_hours
 
     @property
     def max_new_session_tries(self) -> int:
-        """新会话尝试账户数"""
         return self._config.retry.max_new_session_tries
 
     @property
     def max_request_retries(self) -> int:
-        """请求失败重试次数"""
         return self._config.retry.max_request_retries
 
     @property
     def max_account_switch_tries(self) -> int:
-        """账户切换尝试次数"""
         return self._config.retry.max_account_switch_tries
 
     @property
     def account_failure_threshold(self) -> int:
-        """账户失败阈值"""
         return self._config.retry.account_failure_threshold
 
     @property
     def rate_limit_cooldown_seconds(self) -> int:
-        """429冷却时间（秒）"""
         return self._config.retry.rate_limit_cooldown_seconds
 
     @property
     def session_cache_ttl_seconds(self) -> int:
-        """会话缓存时间（秒）"""
         return self._config.retry.session_cache_ttl_seconds
 
     @property
     def auto_refresh_accounts_seconds(self) -> int:
-        """自动刷新账号间隔（秒，0禁用）"""
         return self._config.retry.auto_refresh_accounts_seconds
 
     @property
     def login_refresh_polling_seconds(self) -> int:
-        """账户过期检查轮询间隔（秒，0禁用）"""
         return self._config.retry.login_refresh_polling_seconds
 
 
-# ==================== 全局配置管理器 ====================
-
 config_manager = ConfigManager()
 
-# 注意：不要直接引用 config_manager.config，因为 reload() 后引用会失效
-# 应该始终通过 config_manager.config 访问配置
+
 def get_config() -> AppConfig:
-    """获取当前配置（支持热更新）"""
     return config_manager.config
 
-# 为了向后兼容，保留 config 变量，但使用属性访问
+
 class _ConfigProxy:
-    """配置代理，确保始终访问最新配置"""
     @property
     def basic(self):
         return config_manager.config.basic
@@ -397,5 +301,6 @@ class _ConfigProxy:
     @property
     def session(self):
         return config_manager.config.session
+
 
 config = _ConfigProxy()

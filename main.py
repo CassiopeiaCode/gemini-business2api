@@ -40,7 +40,7 @@ os.makedirs(IMAGE_DIR, exist_ok=True)
 os.makedirs(VIDEO_DIR, exist_ok=True)
 
 # 导入认证模块
-from core.auth import verify_api_key, verify_gemini_api_key
+from core.auth import verify_api_key, verify_gemini_api_key, verify_sync_secret
 from core.session_auth import is_logged_in, login_user, logout_user, require_login, generate_session_secret
 
 # 导入 Gemini 格式转换器
@@ -1240,6 +1240,57 @@ async def admin_update_config(request: Request, accounts_data: list = Body(...))
         logger.error(f"[CONFIG] 更新配置失败: {str(e)}")
         raise HTTPException(500, f"更新失败: {str(e)}")
 
+def _upsert_account_config(accounts_data: list, account_data: dict) -> tuple[list, str]:
+    normalized = dict(account_data)
+    account_id = str(normalized.get("id") or "").strip()
+    if not account_id:
+        raise HTTPException(400, "account.id is required")
+
+    for field in ("secure_c_ses", "csesidx", "config_id"):
+        if not str(normalized.get(field) or "").strip():
+            raise HTTPException(400, f"account.{field} is required")
+
+    normalized["id"] = account_id
+    for idx, existing in enumerate(accounts_data):
+        if str(existing.get("id") or "").strip() == account_id:
+            accounts_data[idx] = normalized
+            return accounts_data, "updated"
+
+    accounts_data.append(normalized)
+    return accounts_data, "created"
+
+
+@app.post("/internal/slave/accounts/upsert")
+async def internal_upsert_slave_account(payload: dict = Body(...), authorization: Optional[str] = Header(default=None)):
+    global multi_account_mgr
+
+    if not config.basic.sync_enabled:
+        raise HTTPException(403, "sync is disabled")
+
+    verify_sync_secret(config.basic.sync_secret, authorization)
+
+    source = str(payload.get("source") or "").strip() or "unknown"
+    account_data = payload.get("account")
+    if not isinstance(account_data, dict):
+        raise HTTPException(400, "account is required")
+
+    accounts_data = load_accounts_from_source()
+    accounts_data, action = _upsert_account_config(accounts_data, account_data)
+    multi_account_mgr = _update_accounts_config(
+        accounts_data, multi_account_mgr, http_client, USER_AGENT,
+        ACCOUNT_FAILURE_THRESHOLD, RATE_LIMIT_COOLDOWN_SECONDS,
+        SESSION_CACHE_TTL_SECONDS, global_stats
+    )
+    logger.info(f"[SYNC] account {action}: {account_data.get('id')} from {source}")
+    return {
+        "status": "success",
+        "action": action,
+        "account_id": account_data.get("id"),
+        "source": source,
+        "account_count": len(multi_account_mgr.accounts),
+    }
+
+
 @app.post("/admin/register/start")
 @require_login()
 async def admin_start_register(request: Request, count: Optional[int] = Body(default=None), domain: Optional[str] = Body(default=None)):
@@ -1388,6 +1439,9 @@ async def admin_get_settings(request: Request):
             "refresh_window_hours": config.basic.refresh_window_hours,
             "register_default_count": config.basic.register_default_count,
             "register_domain": config.basic.register_domain,
+            "sync_enabled": config.basic.sync_enabled,
+            "sync_secret": getattr(config.basic, "sync_secret", ""),
+            "master_sync_url": getattr(config.basic, "master_sync_url", ""),
         },
         "image_generation": {
             "enabled": config.image_generation.enabled,
@@ -1441,8 +1495,16 @@ async def admin_update_settings(request: Request, new_settings: dict = Body(...)
         basic.setdefault("register_default_count", config.basic.register_default_count)
         basic.setdefault("register_domain", config.basic.register_domain)
         basic.setdefault("browser_proxy", config.basic.browser_proxy)
+        basic.setdefault("sync_enabled", getattr(config.basic, "sync_enabled", False))
+        basic.setdefault("sync_secret", getattr(config.basic, "sync_secret", ""))
+        basic.setdefault("master_sync_url", getattr(config.basic, "master_sync_url", ""))
         if not isinstance(basic.get("register_domain"), str):
             basic["register_domain"] = ""
+        basic["sync_enabled"] = bool(basic.get("sync_enabled"))
+        if not isinstance(basic.get("sync_secret"), str):
+            basic["sync_secret"] = ""
+        if not isinstance(basic.get("master_sync_url"), str):
+            basic["master_sync_url"] = ""
         basic.pop("duckmail_proxy", None)
         new_settings["basic"] = basic
 
