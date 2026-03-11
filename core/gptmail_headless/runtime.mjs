@@ -1,5 +1,11 @@
 import vm from 'node:vm'
-import { ProxyAgent } from 'undici'
+
+let UndiciProxyAgent = null
+try {
+  ({ ProxyAgent: UndiciProxyAgent } = await import('undici'))
+} catch {
+  UndiciProxyAgent = null
+}
 
 class EventTargetLike {
   constructor() { this._listeners = new Map() }
@@ -131,9 +137,10 @@ class CookieJar {
 export class LightweightPageRuntime {
   constructor({ baseUrl, logger = console, localStorageSeed = {}, sessionStorageSeed = {}, cookieSeed = {}, proxyUrl = '' } = {}) {
     const envProxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy || ''
-    this.baseUrl = baseUrl; this.logger = logger; this.proxyUrl = proxyUrl || envProxyUrl || ''; this.proxyAgent = this.proxyUrl ? new ProxyAgent(this.proxyUrl) : null; this.cookieJar = new CookieJar(cookieSeed)
+    this.baseUrl = baseUrl; this.logger = logger; this.proxyUrl = proxyUrl || envProxyUrl || ''; this.proxyAgent = this.proxyUrl && UndiciProxyAgent ? new UndiciProxyAgent(this.proxyUrl) : null; this.cookieJar = new CookieJar(cookieSeed)
     this.localStorage = new StorageLike(localStorageSeed); this.sessionStorage = new StorageLike(sessionStorageSeed)
     this.networkLog = []; this.intervalHandles = new Set(); this.timeoutHandles = new Set(); this.document = null; this.window = null; this.context = null; this.scripts = []
+    if (this.proxyUrl && !UndiciProxyAgent) this.logger.warn?.('[runtime] proxy requested but undici is unavailable; falling back to direct fetch')
   }
   async load(url, options = {}) {
     const target = new URL(url, this.baseUrl).toString(); this.logger.info?.(`[runtime] load ${target}`)

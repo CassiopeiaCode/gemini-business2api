@@ -46,6 +46,8 @@ def register_one_account(
     http_proxy_value = (proxy if proxy is not None else config.basic.proxy or "").strip()
     mail_proxy = choose_random_httpx_proxy(http_proxy_value)
     provider = (mail_provider or config.basic.mail_provider or "duckmail").lower()
+    if provider == "chatgpt_mail":
+        provider = "chatgpt"
 
     if provider == "chatgpt":
         client = ChatGPTMailClient(

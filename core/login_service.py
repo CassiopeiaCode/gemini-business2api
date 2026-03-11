@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -60,6 +61,50 @@ class LoginService(BaseTaskService[LoginTask]):
         )
         self._is_polling = False
         self.register_service = register_service
+
+    def _get_linux_cpu_load_ratio_percent(self) -> Optional[float]:
+        if not sys.platform.startswith("linux"):
+            return None
+
+        cores = os.cpu_count() or 0
+        if cores <= 0:
+            return None
+
+        load1: Optional[float] = None
+        try:
+            with open("/proc/loadavg", "r", encoding="utf-8") as handle:
+                parts = handle.read().strip().split()
+            if parts:
+                load1 = float(parts[0])
+        except Exception:
+            load1 = None
+
+        if load1 is None:
+            try:
+                load1 = float(os.getloadavg()[0])
+            except Exception:
+                return None
+
+        return load1 / cores * 100.0
+
+    def _auto_heal_can_start_register(self, threshold_percent: float = 30.0) -> bool:
+        if not sys.platform.startswith("linux"):
+            return True
+
+        ratio = self._get_linux_cpu_load_ratio_percent()
+        if ratio is None:
+            logger.warning("[HEAL] cannot determine cpu load ratio on linux; skipping auto-heal register trigger")
+            return False
+
+        if ratio >= threshold_percent:
+            logger.info(
+                "[HEAL] cpu load ratio %.1f%% >= %.1f%%; skipping auto-heal register trigger",
+                ratio,
+                threshold_percent,
+            )
+            return False
+
+        return True
 
     async def start_login(self, account_ids: List[str]) -> LoginTask:
         """启动登录任务"""
@@ -319,6 +364,8 @@ class LoginService(BaseTaskService[LoginTask]):
                         "[HEAL] no candidate accounts in pool (all disabled/expired or empty); triggering auto-heal register"
                     )
                     try:
+                        if not self._auto_heal_can_start_register():
+                            continue
                         await self.register_service.start_register(count=target_min_available)
                         logger.info("[HEAL] auto-heal register task started successfully (pool empty)")
                     except Exception as exc:
@@ -349,6 +396,8 @@ class LoginService(BaseTaskService[LoginTask]):
                         register_count,
                     )
                     try:
+                        if not self._auto_heal_can_start_register():
+                            continue
                         await self.register_service.start_register(count=register_count)
                         logger.info("[HEAL] auto-heal register task started successfully")
                     except Exception as exc:

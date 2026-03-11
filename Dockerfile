@@ -6,6 +6,12 @@ WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --silent
 
+# 为 gptmail-headless 预装 Node 侧代理依赖，供运行时直接复制
+RUN mkdir -p /app/gptmail-headless-deps && \
+    cd /app/gptmail-headless-deps && \
+    npm init -y --silent && \
+    npm install --silent undici
+
 # 复制前端源码并构建
 COPY frontend/ ./
 RUN npm run build
@@ -13,6 +19,13 @@ RUN npm run build
 # Stage 2: 最终运行时镜像
 FROM python:3.11-slim
 WORKDIR /app
+
+# 从前端构建镜像复用 Node.js 运行时，供 gptmail-headless 桥接使用
+COPY --from=frontend-builder /usr/local/bin/node /usr/local/bin/node
+COPY --from=frontend-builder /usr/local/bin/npm /usr/local/bin/npm
+COPY --from=frontend-builder /usr/local/bin/npx /usr/local/bin/npx
+COPY --from=frontend-builder /usr/local/lib/node_modules /usr/local/lib/node_modules
+COPY --from=frontend-builder /app/gptmail-headless-deps/node_modules /app/node_modules
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
