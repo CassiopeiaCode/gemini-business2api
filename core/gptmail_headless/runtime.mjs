@@ -99,8 +99,11 @@ class FrameDocumentLike {
 class DocumentLike extends EventTargetLike {
   constructor(url) {
     super(); this.url = new URL(url); this.readyState = 'loading'; this.title = ''; this.defaultView = null
+    this.documentElement = new ElementLike('html', this)
     this.head = new ElementLike('head', this); this.body = new ElementLike('body', this)
-    this._idMap = new Map(); this._allElements = [this.head, this.body]; this._writeBuffer = ''
+    this.documentElement.appendChild(this.head)
+    this.documentElement.appendChild(this.body)
+    this._idMap = new Map(); this._allElements = [this.documentElement, this.head, this.body]; this._writeBuffer = ''
   }
   _registerId(element) { if (element.id) this._idMap.set(element.id, element); if (!this._allElements.includes(element)) this._allElements.push(element) }
   createElement(tagName) { const element = new ElementLike(tagName, this); this._allElements.push(element); return element }
@@ -184,7 +187,10 @@ export class LightweightPageRuntime {
   }
   _withProxy(options = {}) { return this.proxyAgent ? { ...options, dispatcher: this.proxyAgent } : options }
   _parseHtml(html) {
-    this.scripts = []; const titleMatch = html.match(/<title>([\s\S]*?)<\/title>/i); if (titleMatch) this.document.title = decodeHtml(titleMatch[1].trim())
+    this.scripts = []
+    const htmlTagMatch = html.match(/<html([^>]*)>/i)
+    if (htmlTagMatch) applyAttributes(this.document.documentElement, htmlTagMatch[1] || '')
+    const titleMatch = html.match(/<title>([\s\S]*?)<\/title>/i); if (titleMatch) this.document.title = decodeHtml(titleMatch[1].trim())
     const idRegex = /<([a-zA-Z0-9-]+)([^>]*\sid=["']([^"']+)["'][^>]*)>/g; let idMatch
     while ((idMatch = idRegex.exec(html))) { const element = this.document.createElement(idMatch[1]); element.id = idMatch[3]; if (element.tagName === 'IFRAME') element.contentWindow = { document: new FrameDocumentLike(this.window) }; this.document.body.appendChild(element) }
     const scriptRegex = /<script([^>]*)>([\s\S]*?)<\/script>/gi; let scriptMatch
