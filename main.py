@@ -102,6 +102,84 @@ log_lock = Lock()
 # 统计数据持久化
 stats_lock = asyncio.Lock()  # 改为异步锁
 
+STATS_FLUSH_INTERVAL_SECONDS = float(os.environ.get("STATS_FLUSH_INTERVAL_SECONDS", "2.0"))
+STATS_JSON_PRETTY = os.environ.get("STATS_JSON_PRETTY", "0") == "1"
+
+_stats_flush_task: Optional[asyncio.Task] = None
+_stats_change_seq = 0
+_stats_flushed_seq = 0
+
+
+def _build_stats_snapshot(stats: dict) -> dict:
+    """构造可 JSON 序列化的快照，避免写盘时与并发修改冲突。"""
+    snapshot = dict(stats)
+
+    # 这些字段可能在高频更新；写盘时复制为 list，避免并发修改导致异常或不一致。
+    snapshot["request_timestamps"] = list(stats.get("request_timestamps", []))
+    snapshot["failure_timestamps"] = list(stats.get("failure_timestamps", []))
+    snapshot["rate_limit_timestamps"] = list(stats.get("rate_limit_timestamps", []))
+    snapshot["recent_conversations"] = list(stats.get("recent_conversations", []))
+
+    model_ts = stats.get("model_request_timestamps", {}) or {}
+    snapshot["model_request_timestamps"] = {k: list(v or []) for k, v in model_ts.items()}
+
+    # visitor_ips / account_conversations 为 dict，直接复制即可（值是基本类型）。
+    snapshot["visitor_ips"] = dict(stats.get("visitor_ips", {}) or {})
+    snapshot["account_conversations"] = dict(stats.get("account_conversations", {}) or {})
+
+    return snapshot
+
+
+async def _flush_stats_to_disk(force: bool = False) -> None:
+    """将统计数据写入磁盘（节流）。"""
+    global _stats_flushed_seq, _stats_flush_task
+
+    if storage.is_database_enabled():
+        # 数据库模式下由 save_stats 直接处理。
+        return
+
+    if STATS_FLUSH_INTERVAL_SECONDS <= 0 and not force:
+        return
+
+    snapshot = None
+    seq = _stats_change_seq
+    async with stats_lock:
+        if (seq == _stats_flushed_seq) and not force:
+            return
+        snapshot = _build_stats_snapshot(global_stats)
+
+    try:
+        dump_kwargs = {"ensure_ascii": False}
+        if STATS_JSON_PRETTY:
+            dump_kwargs["indent"] = 2
+        else:
+            dump_kwargs["separators"] = (",", ":")
+
+        payload = json.dumps(snapshot, **dump_kwargs)
+        async with aiofiles.open(STATS_FILE, "w", encoding="utf-8") as f:
+            await f.write(payload)
+
+        _stats_flushed_seq = seq
+
+        # 如果写盘期间又有新的变更，补一轮 flush（否则可能一直等不到下次 save_stats 触发）。
+        if _stats_change_seq != seq:
+            if _stats_flush_task is None or _stats_flush_task.done():
+                _stats_flush_task = asyncio.create_task(_delayed_stats_flush())
+    except Exception as e:
+        logger.error(f"[STATS] 保存统计数据失败: {str(e)[:50]}")
+        # 写盘失败时：保留未 flush 状态，留给下次再试
+
+
+async def _delayed_stats_flush() -> None:
+    try:
+        await asyncio.sleep(STATS_FLUSH_INTERVAL_SECONDS)
+        await _flush_stats_to_disk()
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        return
+
+
 async def load_stats():
     """加载统计数据（异步）。"""
     if storage.is_database_enabled():
@@ -139,11 +217,22 @@ async def save_stats(stats):
                 return
         except Exception as e:
             logger.error(f"[STATS] 数据库保存失败: {str(e)[:50]}")
-    try:
-        async with aiofiles.open(STATS_FILE, 'w', encoding='utf-8') as f:
-            await f.write(json.dumps(stats, ensure_ascii=False, indent=2))
-    except Exception as e:
-        logger.error(f"[STATS] 保存统计数据失败: {str(e)[:50]}")
+    # 文件模式：节流写盘（避免每个请求都 json.dumps + 写文件）
+    global _stats_change_seq, _stats_flush_task
+    _stats_change_seq += 1
+
+    if STATS_FLUSH_INTERVAL_SECONDS <= 0:
+        # 禁用节流时：保持旧行为（立即写盘）
+        # 注意：save_stats 常在 stats_lock 内被调用；这里避免二次加锁导致死锁。
+        if stats_lock.locked():
+            if _stats_flush_task is None or _stats_flush_task.done():
+                _stats_flush_task = asyncio.create_task(_flush_stats_to_disk(force=True))
+        else:
+            await _flush_stats_to_disk(force=True)
+        return
+
+    if _stats_flush_task is None or _stats_flush_task.done():
+        _stats_flush_task = asyncio.create_task(_delayed_stats_flush())
 
 # 初始化统计数据（需要在启动时异步加载）
 global_stats = {
@@ -811,6 +900,28 @@ async def startup_event():
             logger.error(f"[SYSTEM] 启动登录服务失败: {e}")
     else:
         logger.info("[SYSTEM] 自动登录刷新未启用或依赖不可用")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """应用关闭时尽量落盘（避免丢失最后一段统计/心跳）。"""
+    global _stats_flush_task
+
+    try:
+        if _stats_flush_task is not None and not _stats_flush_task.done():
+            _stats_flush_task.cancel()
+    except Exception:
+        pass
+
+    try:
+        await _flush_stats_to_disk(force=True)
+    except Exception:
+        pass
+
+    try:
+        uptime_tracker.flush_heartbeats(force=True)
+    except Exception:
+        pass
 
 # ---------- 日志脱敏函数 ----------
 def get_sanitized_logs(limit: int = 100) -> list:

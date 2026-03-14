@@ -7,6 +7,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional
 import json
 import os
+import time
 from threading import Lock
 
 # 北京时区 UTC+8
@@ -19,6 +20,9 @@ WARNING_STATUS_CODES = {429}
 
 _storage_path: Optional[str] = None
 _storage_lock = Lock()
+_flush_interval_seconds = float(os.environ.get("UPTIME_FLUSH_INTERVAL_SECONDS", "2.0"))
+_last_flush_monotonic = 0.0
+_dirty = False
 
 # 服务注册表
 SERVICES = {
@@ -72,6 +76,26 @@ def _save_heartbeats() -> None:
         return
 
 
+def flush_heartbeats(force: bool = False) -> None:
+    """将心跳写入磁盘（节流）。"""
+    global _last_flush_monotonic, _dirty
+    if not _storage_path:
+        return
+    if _flush_interval_seconds <= 0:
+        _save_heartbeats()
+        _dirty = False
+        return
+
+    now = time.monotonic()
+    if not force and (now - _last_flush_monotonic) < _flush_interval_seconds:
+        _dirty = True
+        return
+
+    _last_flush_monotonic = now
+    _save_heartbeats()
+    _dirty = False
+
+
 def load_heartbeats() -> None:
     if not _storage_path or not os.path.exists(_storage_path):
         return
@@ -110,7 +134,7 @@ def record_request(
         heartbeat["status_code"] = status_code
 
     SERVICES[service]["heartbeats"].append(heartbeat)
-    _save_heartbeats()
+    flush_heartbeats()
 
 
 def get_realtime_status() -> Dict:

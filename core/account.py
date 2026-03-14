@@ -57,8 +57,17 @@ class AccountConfig:
         try:
             # 解析过期时间（假设为北京时间）
             beijing_tz = timezone(timedelta(hours=8))
-            expire_time = datetime.strptime(self.expires_at, "%Y-%m-%d %H:%M:%S")
-            expire_time = expire_time.replace(tzinfo=beijing_tz)
+
+            # 缓存解析结果，避免高频调用时反复 strptime
+            cached_str = getattr(self, "_expires_at_str_cache", None)
+            cached_dt = getattr(self, "_expires_at_dt_cache", None)
+            if cached_dt is not None and cached_str == self.expires_at:
+                expire_time = cached_dt
+            else:
+                expire_time = datetime.strptime(self.expires_at, "%Y-%m-%d %H:%M:%S")
+                expire_time = expire_time.replace(tzinfo=beijing_tz)
+                setattr(self, "_expires_at_str_cache", self.expires_at)
+                setattr(self, "_expires_at_dt_cache", expire_time)
 
             # 当前时间（北京时间）
             now = datetime.now(beijing_tz)
