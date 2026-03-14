@@ -73,6 +73,12 @@ class RetryConfig(BaseModel):
     session_cache_ttl_seconds: int = Field(default=3600, ge=0, le=86400, description="Session cache TTL seconds")
     auto_refresh_accounts_seconds: int = Field(default=60, ge=0, le=600, description="Auto refresh accounts seconds")
     login_refresh_polling_seconds: int = Field(default=1800, ge=0, le=86400, description="Login refresh polling seconds")
+    auto_heal_cpu_load_threshold_percent: float = Field(
+        default=30.0,
+        ge=0.0,
+        le=100.0,
+        description="Auto-heal register CPU load ratio threshold percent (Linux only)",
+    )
 
 
 class PublicDisplayConfig(BaseModel):
@@ -137,12 +143,23 @@ class ConfigManager:
             master_sync_url=str(basic_data.get("master_sync_url") or "").strip(),
         )
 
+        retry_data = dict(yaml_data.get("retry", {}) or {})
+        env_threshold = os.getenv("AUTO_HEAL_CPU_LOAD_THRESHOLD_PERCENT")
+        if env_threshold is not None and str(env_threshold).strip() != "":
+            try:
+                retry_data["auto_heal_cpu_load_threshold_percent"] = float(str(env_threshold).strip())
+            except Exception:
+                print(
+                    f"[WARN] invalid AUTO_HEAL_CPU_LOAD_THRESHOLD_PERCENT={env_threshold!r}; "
+                    "falling back to settings/default"
+                )
+
         self._config = AppConfig(
             security=security_config,
             basic=basic_config,
             image_generation=ImageGenerationConfig(**yaml_data.get("image_generation", {})),
             video_generation=VideoGenerationConfig(**yaml_data.get("video_generation", {})),
-            retry=RetryConfig(**yaml_data.get("retry", {})),
+            retry=RetryConfig(**retry_data),
             public_display=PublicDisplayConfig(**yaml_data.get("public_display", {})),
             session=SessionConfig(**yaml_data.get("session", {})),
         )

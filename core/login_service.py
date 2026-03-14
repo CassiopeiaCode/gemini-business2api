@@ -362,9 +362,10 @@ class LoginService(BaseTaskService[LoginTask]):
 
                     logger.warning(
                         "[HEAL] no candidate accounts in pool (all disabled/expired or empty); triggering auto-heal register"
-                    )
+                     )
                     try:
-                        if not self._auto_heal_can_start_register():
+                        threshold = float(getattr(config.retry, "auto_heal_cpu_load_threshold_percent", 30.0) or 30.0)
+                        if not self._auto_heal_can_start_register(threshold_percent=threshold):
                             continue
                         await self.register_service.start_register(count=target_min_available)
                         logger.info("[HEAL] auto-heal register task started successfully (pool empty)")
@@ -396,7 +397,8 @@ class LoginService(BaseTaskService[LoginTask]):
                         register_count,
                     )
                     try:
-                        if not self._auto_heal_can_start_register():
+                        threshold = float(getattr(config.retry, "auto_heal_cpu_load_threshold_percent", 30.0) or 30.0)
+                        if not self._auto_heal_can_start_register(threshold_percent=threshold):
                             continue
                         await self.register_service.start_register(count=register_count)
                         logger.info("[HEAL] auto-heal register task started successfully")

@@ -209,7 +209,7 @@ Thanks to [PR #9](https://github.com/Dreamy-rain/gemini-business2api/pull/9) for
 
 - Account config prioritizes `ACCOUNTS_CONFIG` env var, or can be entered in admin panel and saved to `data/accounts.json`.
 - For authentication, configure `API_KEY` in the admin settings to protect `/v1/chat/completions`.
-- On Linux, the auto-heal register trigger (keeping 60 available accounts) runs only when CPU load ratio (1-min load / cores) is < 30%.
+- On Linux, the auto-heal register trigger (keeping 60 available accounts) runs only when CPU load ratio (1-min load / cores) is < 30%; override via `AUTO_HEAL_CPU_LOAD_THRESHOLD_PERCENT`.
 
 ### Documentation
 

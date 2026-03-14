@@ -236,7 +236,7 @@ docker-compose pull && docker-compose up -d
 
 - 账号配置优先读取 `ACCOUNTS_CONFIG`，也可在管理面板中录入并保存至 `data/accounts.json`。
 - 如需鉴权，可在管理面板设置中配置 `API_KEY` 保护 `/v1/chat/completions`。
-- Linux 环境下，自愈逻辑（自动补足至 60 个可用账号）仅在 CPU 负载率（1 分钟 load / 核数）< 30% 时触发。
+- Linux 环境下，自愈逻辑（自动补足至 60 个可用账号）仅在 CPU 负载率（1 分钟 load / 核数）< 30% 时触发；可用环境变量 `AUTO_HEAL_CPU_LOAD_THRESHOLD_PERCENT` 覆盖阈值。
 
 ### 更多文档
 
