@@ -428,6 +428,11 @@ class GeminiAutomation:
         if "auth.business.gemini.google/login" in current_url:
             return False
 
+        # 如果已经满足最后一步（URL 已包含 csesidx 和 cid），直接跳过用户名设置
+        if "csesidx=" in current_url and "/cid/" in current_url:
+            self._log("info", f"fullName onboarding skipped (business params already ready): {current_url}")
+            return True
+
         self._log("info", "entering fullName onboarding flow")
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
@@ -436,6 +441,11 @@ class GeminiAutomation:
 
             # 等待 fullName 输入框出现并可交互
             for i in range(30):
+                # 等待期间如果 URL 已经满足最后一步要求，直接跳到最后一步
+                url = page.url
+                if "csesidx=" in url and "/cid/" in url:
+                    self._log("info", f"fullName wait aborted (business params already ready): {url}")
+                    return True
                 try:
                     el = page.ele("css:input[formcontrolname='fullName']", timeout=1)
                     if el:
