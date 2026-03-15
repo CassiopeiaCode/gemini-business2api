@@ -29,7 +29,9 @@ COPY --from=frontend-builder /app/gptmail-headless-deps/node_modules /app/node_m
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    TZ=Asia/Shanghai
+    TZ=Asia/Shanghai \
+    CLOAKBROWSER_AUTO_UPDATE=false \
+    CLOAKBROWSER_DOWNLOAD_URL=https://github.com/CloakHQ/cloakbrowser/releases/download
 
 # 安装 Python 依赖和浏览器依赖（合并为单一 RUN 指令以减少层数）
 COPY requirements.txt .
@@ -40,30 +42,22 @@ RUN apt-get update && \
         tzdata \
         chromium chromium-driver \
         dbus dbus-x11 \
-        xvfb xauth \
+        xvfb xauth xdotool \
         procps psmisc \
         libglib2.0-0 libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
         libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 \
         libxfixes3 libxrandr2 libgbm1 libasound2 libpango-1.0-0 \
-        libcairo2 fonts-liberation fonts-noto-cjk && \
+        libcairo2 fonts-liberation fonts-noto-cjk \
+        libdbus-1-3 libatspi2.0-0 \
+        libfontconfig1 libx11-xcb1 libx11-6 libxcb1 libxext6 libxshmfence1 \
+        libgtk-3-0 libpangocairo-1.0-0 libcairo-gobject2 libgdk-pixbuf-2.0-0 \
+        libxss1 libxtst6 && \
     ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
     pip install --no-cache-dir -r requirements.txt && \
+    python -c "from cloakbrowser.download import ensure_binary; ensure_binary()" && \
     apt-get purge -y gcc && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-
-# 下载并解压 fingerprint-chromium 浏览器
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends xz-utils && \
-    curl -L -o /tmp/ungoogled-chromium.tar.xz \
-        https://github.com/adryfish/fingerprint-chromium/releases/download/142.0.7444.175/ungoogled-chromium-142.0.7444.175-1-x86_64_linux.tar.xz && \
-    cd /app && \
-    tar -xf /tmp/ungoogled-chromium.tar.xz && \
-    rm /tmp/ungoogled-chromium.tar.xz && \
-    chmod +x /app/ungoogled-chromium-142.0.7444.175-1-x86_64_linux/chrome && \
-    apt-get purge -y xz-utils && \
-    apt-get autoremove -y && \
-    rm -rf /var/lib/apt/lists/*
 
 # 复制后端代码
 COPY main.py .

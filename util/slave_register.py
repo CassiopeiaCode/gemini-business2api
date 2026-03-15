@@ -34,7 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--browser-engine", default=None)
     parser.add_argument("--browser-headless", action="store_true", default=None)
     parser.add_argument("--no-browser-headless", dest="browser_headless", action="store_false")
-    parser.add_argument("--fp-chrome-path", default=None)
+    parser.add_argument(
+        "--fp-chrome-path",
+        default=None,
+        help="Optional fp engine browser binary path override (CloakBrowser). Prefer CLOAKBROWSER_BINARY_PATH env var.",
+    )
     parser.add_argument("--user-agent", default=DEFAULT_USER_AGENT)
     parser.add_argument("--timeout", type=float, default=30.0)
     return parser

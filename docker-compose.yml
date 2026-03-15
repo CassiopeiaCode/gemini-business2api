@@ -23,6 +23,9 @@ services:
       - ./data:/app/data
     env_file:
       - .env
+    environment:
+      CLOAKBROWSER_AUTO_UPDATE: "false"
+      CLOAKBROWSER_DOWNLOAD_URL: "https://github.com/CloakHQ/cloakbrowser/releases/download"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7860/health"]

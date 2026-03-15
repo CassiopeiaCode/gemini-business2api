@@ -86,7 +86,7 @@
                 </div>
                 <div class="flex items-center justify-between gap-2 text-xs text-muted-foreground">
                   <span>浏览器引擎</span>
-                  <HelpTip text="DP: 稳定推荐。UC: 反检测较好。FP: 最强反检测，支持指纹隔离（需安装 fingerprint-chromium）。" />
+                  <HelpTip text="DP: 稳定推荐。UC: 反检测较好。FP: 使用 CloakBrowser 的 stealth Chromium（自动下载/缓存）。" />
                 </div>
                 <SelectMenu
                   v-model="localSettings.basic.browser_engine"
@@ -95,14 +95,14 @@
                 />
                 <template v-if="localSettings.basic.browser_engine === 'fp'">
                   <div class="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                    <span>fingerprint-chromium 路径</span>
-                    <HelpTip text="留空则自动检测。Windows: chrome.exe 路径，Linux: 可执行文件路径，macOS: .app 内的可执行文件路径。" />
+                    <span>浏览器二进制路径（可选）</span>
+                    <HelpTip text="留空则自动使用 CloakBrowser 下载的 stealth Chromium。需要自定义二进制时再填写。也兼容旧的 fingerprint-chromium 路径。" />
                   </div>
                   <input
                     v-model="localSettings.basic.fp_chrome_path"
                     type="text"
                     class="w-full rounded-2xl border border-input bg-background px-3 py-2 text-sm"
-                    placeholder="留空则自动检测"
+                    placeholder="留空则自动下载/使用"
                   />
                 </template>
                 <template v-if="localSettings.basic.mail_provider === 'duckmail'">
@@ -301,7 +301,7 @@ const mailProviderOptions = [
 const browserEngineOptions = [
   { label: 'DP - 稳定推荐', value: 'dp' },
   { label: 'UC - 反检测较好', value: 'uc' },
-  { label: 'FP - 最强反检测（fingerprint-chromium）', value: 'fp' },
+  { label: 'FP - CloakBrowser stealth Chromium', value: 'fp' },
 ]
 const imageOutputOptions = [
   { label: 'Base64 编码', value: 'base64' },

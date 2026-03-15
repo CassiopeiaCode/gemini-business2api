@@ -45,7 +45,7 @@ class BasicConfig(BaseModel):
     chatgpt_mail_api_key: str = Field(default="", description="ChatGPT Mail API key")
     browser_engine: str = Field(default="dp", description="Browser engine")
     browser_headless: bool = Field(default=False, description="Headless browser mode")
-    fp_chrome_path: str = Field(default="", description="Fingerprint Chromium path")
+    fp_chrome_path: str = Field(default="", description="FP engine browser binary path override (optional)")
     refresh_window_hours: int = Field(default=1, ge=0, le=24, description="Refresh window hours")
     register_default_count: int = Field(default=1, ge=1, le=30, description="Default register count")
     register_domain: str = Field(default="", description="Default register domain")

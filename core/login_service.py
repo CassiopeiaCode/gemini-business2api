@@ -231,7 +231,7 @@ class LoginService(BaseTaskService[LoginTask]):
                 log_callback=log_cb,
             )
         elif browser_engine == "dp-fc" or browser_engine == "fp":
-            # DrissionPage + fingerprint-chromium 引擎
+            # DrissionPage + CloakBrowser(stealth Chromium) 引擎（历史上叫 fp/fingerprint-chromium）
             automation = GeminiAutomationFP(
                 user_agent=self.user_agent,
                 proxy=browser_proxy,

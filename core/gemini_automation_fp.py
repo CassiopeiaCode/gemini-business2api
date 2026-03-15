@@ -1,6 +1,8 @@
 """
-Gemini自动化登录模块（使用 DrissionPage + fingerprint-chromium）
-复用 DrissionPage 的自动化逻辑，但使用 fingerprint-chromium 作为浏览器二进制
+Gemini 自动化登录模块（使用 DrissionPage + CloakBrowser stealth Chromium）。
+
+历史上该引擎叫 “fp / fingerprint-chromium”。现在默认改为使用 CloakBrowser 下载的
+stealth Chromium 二进制（无需额外安装 fingerprint-chromium）。
 """
 import random
 import string
@@ -22,7 +24,7 @@ DEFAULT_XSRF_TOKEN = "KdLRzKwwBTD5wo8nUollAbY6cW0"
 
 
 class GeminiAutomationFP:
-    """Gemini自动化登录（DrissionPage + fingerprint-chromium）"""
+    """Gemini 自动化登录（DrissionPage + CloakBrowser stealth Chromium）。"""
 
     def __init__(
         self,
@@ -33,7 +35,7 @@ class GeminiAutomationFP:
         log_callback=None,
         fp_chrome_path: str = "",
     ) -> None:
-        # fingerprint-chromium 使用浏览器默认 UA，不设置自定义 UA
+        # fp 引擎使用浏览器默认 UA，不设置自定义 UA（减少可疑差异）
         self.user_agent = ""
         self.proxy = proxy
         self.headless = headless
@@ -43,7 +45,35 @@ class GeminiAutomationFP:
         self.fingerprint_seed = self._generate_fingerprint_seed()
 
     def _find_fp_chrome(self) -> str:
-        """查找 fingerprint-chromium 可执行文件"""
+        """查找 fp 引擎使用的浏览器二进制。
+
+        优先顺序：
+        1) `CLOAKBROWSER_BINARY_PATH`（官方）
+        2) `FP_CHROME_PATH`（历史兼容）
+        3) CloakBrowser 自动下载的 stealth Chromium
+        4) 旧 fingerprint-chromium 常见安装路径（兜底）
+        """
+        # 1) 明确指定（推荐）
+        env_path = (os.getenv("CLOAKBROWSER_BINARY_PATH") or "").strip()
+        if env_path and os.path.exists(env_path):
+            return env_path
+
+        # 2) 历史兼容
+        env_path = (os.getenv("FP_CHROME_PATH") or "").strip()
+        if env_path and os.path.exists(env_path):
+            return env_path
+
+        # 3) CloakBrowser 自动下载的 stealth Chromium（默认）
+        try:
+            from cloakbrowser.download import ensure_binary
+
+            binary = ensure_binary()
+            if binary and os.path.exists(binary):
+                return binary
+        except Exception as exc:
+            self._log("warning", f"cloakbrowser binary not available: {exc}")
+
+        # 4) 旧 fingerprint-chromium / ungoogled-chromium 常见路径（兜底）
         # Windows 常见路径
         windows_paths = [
             r"C:\Program Files\fingerprint-chromium\chrome.exe",
@@ -53,7 +83,7 @@ class GeminiAutomationFP:
         
         # Linux 常见路径
         linux_paths = [
-            # Docker 容器内的路径（优先）
+            # 旧 Docker 镜像内的路径（历史兼容）
             "/app/ungoogled-chromium-142.0.7444.175-1-x86_64_linux/chrome",
             # 常见安装路径
             "/usr/bin/fingerprint-chromium",
@@ -67,16 +97,11 @@ class GeminiAutomationFP:
             os.path.expanduser("~/Applications/fingerprint-chromium.app/Contents/MacOS/fingerprint-chromium"),
         ]
         
-        # 尝试所有路径
+        # 尝试所有路径（兜底）
         for path in windows_paths + linux_paths + mac_paths:
             if os.path.exists(path):
                 return path
-        
-        # 尝试从环境变量获取
-        env_path = os.getenv("FP_CHROME_PATH")
-        if env_path and os.path.exists(env_path):
-            return env_path
-        
+
         # 返回空字符串，让 DrissionPage 使用默认 Chrome
         return ""
 
@@ -112,15 +137,15 @@ class GeminiAutomationFP:
             self._cleanup_user_data(user_data_dir)
 
     def _create_page(self) -> ChromiumPage:
-        """创建浏览器页面（使用 fingerprint-chromium）"""
+        """创建浏览器页面（fp 引擎）。"""
         options = ChromiumOptions()
         
-        # 设置 fingerprint-chromium 二进制路径
+        # 设置 fp 引擎浏览器二进制路径（默认：CloakBrowser stealth Chromium）
         if self.fp_chrome_path:
             options.set_browser_path(self.fp_chrome_path)
-            self._log("info", f"using fingerprint-chromium: {self.fp_chrome_path}")
+            self._log("info", f"using fp engine browser binary: {self.fp_chrome_path}")
         else:
-            self._log("warning", "fingerprint-chromium path not found, using default chrome")
+            self._log("warning", "fp engine browser binary not found, using default chrome")
         
         # 基础参数
         options.set_argument("--incognito")
@@ -128,6 +153,7 @@ class GeminiAutomationFP:
         options.set_argument("--disable-dev-shm-usage")
         options.set_argument("--disable-setuid-sandbox")
         options.set_argument("--disable-blink-features=AutomationControlled")
+        options.set_argument("--ignore-gpu-blocklist")
         options.set_argument("--window-size=1280,800")
 
         # 降低内存/后台开销（对登录流程通常无副作用）
@@ -150,12 +176,29 @@ class GeminiAutomationFP:
             options.set_pref("profile.managed_default_content_settings.images", 2)
             options.set_pref("profile.default_content_setting_values.images", 2)
 
-        # fingerprint-chromium 使用浏览器默认 UA，不设置自定义 UA
+        # fp 引擎使用浏览器默认 UA，不设置自定义 UA
         # options.set_user_agent(self.user_agent)
 
-        # fingerprint-chromium 指纹参数（核心）
-        options.set_argument(f"--fingerprint={self.fingerprint_seed}")
-        options.set_argument("--fingerprint-platform=windows")
+        # CloakBrowser 指纹/反检测参数（核心）。
+        # 若 cloakbrowser 不可用，则降级使用最小的 fingerprint 参数。
+        stealth_ok = False
+        try:
+            from cloakbrowser.config import get_default_stealth_args
+
+            stealth_args = get_default_stealth_args()
+            stealth_args = [
+                (f"--fingerprint={self.fingerprint_seed}" if arg.startswith("--fingerprint=") else arg)
+                for arg in stealth_args
+            ]
+            for arg in stealth_args:
+                options.set_argument(arg)
+            stealth_ok = True
+        except Exception as exc:
+            self._log("warning", f"cloakbrowser stealth args unavailable: {exc}")
+
+        if not stealth_ok:
+            options.set_argument(f"--fingerprint={self.fingerprint_seed}")
+            options.set_argument("--fingerprint-platform=windows")
         
         # 语言设置（确保使用中文界面）
         options.set_argument("--lang=zh-CN")
@@ -192,10 +235,10 @@ class GeminiAutomationFP:
         page = ChromiumPage(options)
         page.set.timeouts(self.timeout)
 
-        # fingerprint-chromium 自带反检测，不需要注入脚本
+        # fp 引擎二进制自带反检测，不需要注入脚本
         # 浏览器指纹随机化由 --fingerprint 参数控制
         
-        self._log("info", f"fingerprint-chromium started with seed: {self.fingerprint_seed}")
+        self._log("info", f"fp engine browser started with seed: {self.fingerprint_seed}")
         return page
 
     def _run_flow(self, page, email: str, mail_client) -> dict:
