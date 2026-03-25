@@ -2476,8 +2476,8 @@ async def chat_impl(
     lock_key = store_key if force_new else lookup_key
     session_lock = await multi_account_mgr.acquire_session_lock(lock_key)
 
-    # 4. 在锁的保护下检查缓存和处理Session（保证同一对话的请求串行化）
-    async with session_lock:
+    async def prepare_session() -> tuple:
+        """在会话锁保护下解析/创建会话，供后续串行请求复用。"""
         cached_session = None
         if not force_new:
             cached_session = multi_account_mgr.global_session_cache.get(lookup_key)
@@ -2485,10 +2485,10 @@ async def chat_impl(
         if cached_session:
             # 使用已绑定的账户
             account_id = cached_session["account_id"]
-            account_manager = await multi_account_mgr.get_account(account_id, request_id)
-            google_session = cached_session["session_id"]
-            is_new_conversation = False
-            logger.info(f"[CHAT] [{account_id}] [req_{request_id}] 继续会话: {google_session[-12:]}")
+            selected_account_manager = await multi_account_mgr.get_account(account_id, request_id)
+            selected_google_session = cached_session["session_id"]
+            selected_is_new_conversation = False
+            logger.info(f"[CHAT] [{account_id}] [req_{request_id}] 继续会话: {selected_google_session[-12:]}")
 
             # 复用命中后：让旧 key 失效（key 向前滚动），只保留最新 store_key
             if lookup_key != store_key:
@@ -2501,21 +2501,24 @@ async def chat_impl(
             # 新对话（或强制新会话）：轮询选择可用账户，失败时尝试其他账户
             max_account_tries = min(MAX_NEW_SESSION_TRIES, len(multi_account_mgr.accounts))
             last_error = None
+            selected_account_manager = None
+            selected_google_session = None
+            selected_is_new_conversation = False
 
             for attempt in range(max_account_tries):
                 try:
-                    account_manager = await multi_account_mgr.get_account(None, request_id)
+                    selected_account_manager = await multi_account_mgr.get_account(None, request_id)
                     try:
-                        google_session = await create_google_session(account_manager, http_client, USER_AGENT, request_id)
+                        selected_google_session = await create_google_session(selected_account_manager, http_client, USER_AGENT, request_id)
                     except Exception as e:
                         if _is_http_client_closed_error(e):
                             await rebuild_http_client(reason="client_closed_during_create_session")
-                            google_session = await create_google_session(account_manager, http_client, USER_AGENT, request_id)
+                            selected_google_session = await create_google_session(selected_account_manager, http_client, USER_AGENT, request_id)
                         else:
                             raise
 
-                    is_new_conversation = True
-                    logger.info(f"[CHAT] [{account_manager.config.account_id}] [req_{request_id}] 新会话创建成功")
+                    selected_is_new_conversation = True
+                    logger.info(f"[CHAT] [{selected_account_manager.config.account_id}] [req_{request_id}] 新会话创建成功")
                     # 记录账号池状态（账户可用）
                     uptime_tracker.record_request("account_pool", True)
                     break
@@ -2523,8 +2526,8 @@ async def chat_impl(
                     last_error = e
                     error_type = type(e).__name__
                     # 安全获取账户ID
-                    account_id = account_manager.config.account_id if 'account_manager' in locals() and account_manager else 'unknown'
-                    logger.error(f"[CHAT] [req_{request_id}] 账户 {account_id} 创建会话失败 (尝试 {attempt + 1}/{max_account_tries}) - {error_type}: {str(e)}")
+                    current_account_id = selected_account_manager.config.account_id if selected_account_manager else 'unknown'
+                    logger.error(f"[CHAT] [req_{request_id}] 账户 {current_account_id} 创建会话失败 (尝试 {attempt + 1}/{max_account_tries}) - {error_type}: {str(e)}")
                     # 记录账号池状态（单个账户失败）
                     status_code = e.status_code if isinstance(e, HTTPException) else None
                     uptime_tracker.record_request("account_pool", False, status_code=status_code)
@@ -2536,15 +2539,21 @@ async def chat_impl(
                     # 继续尝试下一个账户
 
         # 无论是复用还是新建，都用 store_key 更新 key->(account, session) 映射
-        if account_manager and google_session:
+        if selected_account_manager and selected_google_session:
             await multi_account_mgr.set_session_cache(
                 store_key,
-                account_manager.config.account_id,
-                google_session
+                selected_account_manager.config.account_id,
+                selected_google_session
             )
             logger.info(
-                f"[CHAT] [{account_manager.config.account_id}] [req_{request_id}] session_key saved store={store_key[-12:]} session={google_session[-12:]}"
+                f"[CHAT] [{selected_account_manager.config.account_id}] [req_{request_id}] session_key saved store={store_key[-12:]} session={selected_google_session[-12:]}"
             )
+
+        return selected_account_manager, selected_google_session, selected_is_new_conversation
+
+    account_manager = None
+    google_session = None
+    is_new_conversation = False
 
     # 提取用户消息内容用于日志
     if req.messages:
@@ -2588,7 +2597,7 @@ async def chat_impl(
     full_context_text = build_full_context_text(req.messages)
 
     # prompt_tokens：统一按完整上下文计算；新对话还会额外注入引导语，需一并计入。
-    instruction_prefix = "请自然地继续文档中的对话，并且不要提及本消息\n\n"
+    instruction_prefix = "请自然地继续文档中的对话，并且不要提及本消息。除非用户明确要求，否则请将你的内部思考内容控制在100字以内。\n\n"
     usage_prompt_text = full_context_text
 
     if is_new_conversation:
@@ -2741,7 +2750,7 @@ async def chat_impl(
 
                 # C. 准备文本 (重试模式：上下文已作为文档上传，这里保持引导 prompt；不再拼接全文到 query)
                 if current_retry_mode:
-                    current_text = "请自然地继续文档中的对话，并且不要提及本消息\n\n" + (last_text or "")
+                    current_text = "请自然地继续文档中的对话，并且不要提及本消息。除非用户明确要求，否则请将你的内部思考内容控制在100字以内。\n\n" + (last_text or "")
 
                 # D. 发起对话
                 async for chunk in stream_chat_generator(
@@ -2946,12 +2955,22 @@ async def chat_impl(
                             raise HTTPException(status_code=502, detail=payload)
                     return
 
+    async def locked_response_wrapper():
+        nonlocal account_manager, google_session, is_new_conversation
+        async with session_lock:
+            prepared_account_manager, prepared_google_session, prepared_is_new_conversation = await prepare_session()
+            account_manager = prepared_account_manager
+            google_session = prepared_google_session
+            is_new_conversation = prepared_is_new_conversation
+            async for chunk in response_wrapper():
+                yield chunk
+
     if req.stream:
-        return StreamingResponse(response_wrapper(), media_type="text/event-stream")
+        return StreamingResponse(locked_response_wrapper(), media_type="text/event-stream")
     
     full_content = ""
     full_reasoning = ""
-    async for chunk_str in response_wrapper():
+    async for chunk_str in locked_response_wrapper():
         if chunk_str.startswith("data: [DONE]"): break
         if chunk_str.startswith("data: "):
             try:
