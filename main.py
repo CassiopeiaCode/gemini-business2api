@@ -2551,9 +2551,12 @@ async def chat_impl(
 
         return selected_account_manager, selected_google_session, selected_is_new_conversation
 
-    account_manager = None
-    google_session = None
-    is_new_conversation = False
+    initial_account_manager = None
+    initial_google_session = None
+    initial_is_new_conversation = False
+
+    async with session_lock:
+        initial_account_manager, initial_google_session, initial_is_new_conversation = await prepare_session()
 
     # 提取用户消息内容用于日志
     if req.messages:
@@ -2570,6 +2573,10 @@ async def chat_impl(
         preview = "[空消息]"
 
     # 记录请求基本信息
+    account_manager = initial_account_manager
+    google_session = initial_google_session
+    is_new_conversation = initial_is_new_conversation
+
     account_id = account_manager.config.account_id if account_manager else "unknown"
     logger.info(f"[CHAT] [{account_id}] [req_{request_id}] 收到请求: {req.model} | {len(req.messages)}条消息 | stream={req.stream}")
 
@@ -2665,6 +2672,10 @@ async def chat_impl(
                 # A. 新对话/重试模式：把完整上下文作为“文档”上传到当前 Session，并附带在 fileIds 里
                 # 注意：fileId 绑定 Session，因此每次切换 Session 都要重新上传
                 if current_retry_mode and context_doc_b64 and not context_file_id:
+                    logger.info(
+                        f"[CHAT] [{account_manager.config.account_id}] [req_{request_id}] "
+                        f"开始上传上下文文档: session={current_session[-12:]}"
+                    )
                     try:
                         context_file_id = await upload_context_file(
                             current_session,
@@ -2674,6 +2685,10 @@ async def chat_impl(
                             http_client,
                             USER_AGENT,
                             request_id,
+                        )
+                        logger.info(
+                            f"[CHAT] [{account_manager.config.account_id}] [req_{request_id}] "
+                            f"上下文文档上传成功: file_id={str(context_file_id)[-12:]}"
                         )
                     except HTTPException as e:
                         # Model Armor block：按消息长度分位数逐步 base64 化上下文再试
@@ -2697,7 +2712,7 @@ async def chat_impl(
                         last_upload_err: Exception = e
                         uploaded = False
 
-                        for tag, opts in strategies:
+                        for retry_index, (tag, opts) in enumerate(strategies, start=1):
                             try:
                                 transformed_text = build_full_context_text_with_selective_base64(
                                     req.messages,
@@ -2710,7 +2725,7 @@ async def chat_impl(
 
                                 logger.warning(
                                     f"[CHAT] [{account_manager.config.account_id}] [req_{request_id}] "
-                                    f"MODEL_ARMOR_VIOLATION: 上下文上传被拦截，使用 {tag} 策略重试上传"
+                                    f"MODEL_ARMOR_VIOLATION: 上下文上传被拦截，开始第{retry_index}次重试，策略={tag}"
                                 )
 
                                 context_file_id = await upload_context_file(
@@ -2722,15 +2737,33 @@ async def chat_impl(
                                     USER_AGENT,
                                     request_id,
                                 )
+                                logger.info(
+                                    f"[CHAT] [{account_manager.config.account_id}] [req_{request_id}] "
+                                    f"上下文文档重试上传成功: retry={retry_index}, strategy={tag}, "
+                                    f"file_id={str(context_file_id)[-12:]}"
+                                )
                                 uploaded = True
                                 break
                             except Exception as retry_err:
                                 last_upload_err = retry_err
+                                logger.warning(
+                                    f"[CHAT] [{account_manager.config.account_id}] [req_{request_id}] "
+                                    f"上下文文档第{retry_index}次重试失败: strategy={tag}, "
+                                    f"error={type(retry_err).__name__}: {str(retry_err)[:120]}"
+                                )
 
                         if not uploaded:
+                            logger.error(
+                                f"[CHAT] [{account_manager.config.account_id}] [req_{request_id}] "
+                                f"上下文文档上传失败: 已重试{len(strategies)}次"
+                            )
                             raise last_upload_err
 
                     current_file_ids.append(context_file_id)
+                    logger.info(
+                        f"[CHAT] [{account_manager.config.account_id}] [req_{request_id}] "
+                        f"上下文文档已加入 fileIds: total_file_ids={len(current_file_ids)}"
+                    )
 
                 # B. 上传本次消息的图片/文件（如果有）
                 # 注意：fileId 也绑定 Session；同一 Session 内避免重复上传
@@ -2958,10 +2991,9 @@ async def chat_impl(
     async def locked_response_wrapper():
         nonlocal account_manager, google_session, is_new_conversation
         async with session_lock:
-            prepared_account_manager, prepared_google_session, prepared_is_new_conversation = await prepare_session()
-            account_manager = prepared_account_manager
-            google_session = prepared_google_session
-            is_new_conversation = prepared_is_new_conversation
+            account_manager = initial_account_manager
+            google_session = initial_google_session
+            is_new_conversation = initial_is_new_conversation
             async for chunk in response_wrapper():
                 yield chunk
 
