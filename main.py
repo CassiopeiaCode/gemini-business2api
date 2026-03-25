@@ -389,6 +389,7 @@ IMAGE_GENERATION_MODELS = config.image_generation.supported_models
 MAX_NEW_SESSION_TRIES = config.retry.max_new_session_tries
 MAX_REQUEST_RETRIES = config.retry.max_request_retries
 MAX_ACCOUNT_SWITCH_TRIES = config.retry.max_account_switch_tries
+RESPONSE_HEADER_TIMEOUT_SECONDS = config.retry.response_header_timeout_seconds
 ACCOUNT_FAILURE_THRESHOLD = config.retry.account_failure_threshold
 RATE_LIMIT_COOLDOWN_SECONDS = config.retry.rate_limit_cooldown_seconds
 SESSION_CACHE_TTL_SECONDS = config.retry.session_cache_ttl_seconds
@@ -1566,6 +1567,7 @@ async def admin_get_settings(request: Request):
             "max_new_session_tries": config.retry.max_new_session_tries,
             "max_request_retries": config.retry.max_request_retries,
             "max_account_switch_tries": config.retry.max_account_switch_tries,
+            "response_header_timeout_seconds": config.retry.response_header_timeout_seconds,
             "account_failure_threshold": config.retry.account_failure_threshold,
             "rate_limit_cooldown_seconds": config.retry.rate_limit_cooldown_seconds,
             "session_cache_ttl_seconds": config.retry.session_cache_ttl_seconds,
@@ -1588,6 +1590,7 @@ async def admin_update_settings(request: Request, new_settings: dict = Body(...)
     global API_KEY, PROXY, HTTPX_PROXY, BASE_URL, LOGO_URL, CHAT_URL
     global IMAGE_GENERATION_ENABLED, IMAGE_GENERATION_MODELS
     global MAX_NEW_SESSION_TRIES, MAX_REQUEST_RETRIES, MAX_ACCOUNT_SWITCH_TRIES
+    global RESPONSE_HEADER_TIMEOUT_SECONDS
     global ACCOUNT_FAILURE_THRESHOLD, RATE_LIMIT_COOLDOWN_SECONDS, SESSION_CACHE_TTL_SECONDS, AUTO_REFRESH_ACCOUNTS_SECONDS
     global SESSION_EXPIRE_HOURS, multi_account_mgr, http_client
 
@@ -1636,6 +1639,7 @@ async def admin_update_settings(request: Request, new_settings: dict = Body(...)
         retry = dict(new_settings.get("retry") or {})
         retry.setdefault("auto_refresh_accounts_seconds", config.retry.auto_refresh_accounts_seconds)
         retry.setdefault("login_refresh_polling_seconds", getattr(config.retry, "login_refresh_polling_seconds", 1800))
+        retry.setdefault("response_header_timeout_seconds", getattr(config.retry, "response_header_timeout_seconds", 10.0))
         new_settings["retry"] = retry
 
         # 保存旧配置用于对比
@@ -1668,6 +1672,7 @@ async def admin_update_settings(request: Request, new_settings: dict = Body(...)
         MAX_NEW_SESSION_TRIES = config.retry.max_new_session_tries
         MAX_REQUEST_RETRIES = config.retry.max_request_retries
         MAX_ACCOUNT_SWITCH_TRIES = config.retry.max_account_switch_tries
+        RESPONSE_HEADER_TIMEOUT_SECONDS = config.retry.response_header_timeout_seconds
         ACCOUNT_FAILURE_THRESHOLD = config.retry.account_failure_threshold
         RATE_LIMIT_COOLDOWN_SECONDS = config.retry.rate_limit_cooldown_seconds
         SESSION_CACHE_TTL_SECONDS = config.retry.session_cache_ttl_seconds
@@ -3105,12 +3110,28 @@ async def stream_chat_generator(session: str, text_content: str, file_ids: List[
     json_objects = []  # 收集所有响应对象用于图片解析
     file_ids_info = None  # 保存图片信息
 
-    async with http_client.stream(
+    stream_ctx = http_client.stream(
         "POST",
         "https://biz-discoveryengine.googleapis.com/v1alpha/locations/global/widgetStreamAssist",
         headers=headers,
         json=body,
-    ) as r:
+    )
+
+    try:
+        r = await asyncio.wait_for(
+            stream_ctx.__aenter__(),
+            timeout=RESPONSE_HEADER_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError as exc:
+        logger.warning(
+            f"[API] [{account_manager.config.account_id}] [req_{request_id}] "
+            f"等待 Gemini 响应头超时: {RESPONSE_HEADER_TIMEOUT_SECONDS:.1f}秒"
+        )
+        raise httpx.ReadTimeout(
+            f"Timed out waiting {RESPONSE_HEADER_TIMEOUT_SECONDS:.1f}s for upstream response headers"
+        ) from exc
+
+    try:
         if r.status_code != 200:
             error_text = await r.aread()
             uptime_tracker.record_request(model_name, False, status_code=r.status_code)
@@ -3157,6 +3178,8 @@ async def stream_chat_generator(session: str, text_content: str, file_ids: List[
             uptime_tracker.record_request(model_name, False)
             logger.error(f"[API] [{account_manager.config.account_id}] [req_{request_id}] 流处理错误 ({error_type}): {str(e)}")
             raise
+    finally:
+        await stream_ctx.__aexit__(None, None, None)
 
     # 在 async with 块外处理图片下载（避免占用上游连接）
     if file_ids_info:

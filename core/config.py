@@ -68,6 +68,7 @@ class RetryConfig(BaseModel):
     max_new_session_tries: int = Field(default=5, ge=1, le=20, description="Max new session tries")
     max_request_retries: int = Field(default=3, ge=1, le=10, description="Max request retries")
     max_account_switch_tries: int = Field(default=5, ge=1, le=20, description="Max account switch tries")
+    response_header_timeout_seconds: float = Field(default=10.0, ge=1.0, le=120.0, description="Response header timeout seconds")
     account_failure_threshold: int = Field(default=3, ge=1, le=1000, description="Account failure threshold")
     rate_limit_cooldown_seconds: int = Field(default=600, ge=1, le=3600, description="Rate limit cooldown seconds")
     session_cache_ttl_seconds: int = Field(default=3600, ge=0, le=86400, description="Session cache TTL seconds")
