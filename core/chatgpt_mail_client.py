@@ -13,8 +13,53 @@ from core.mail_utils import extract_verification_code
 from core.gptmail_domain_counter import should_refresh_once_for_domain
 
 
+def _scheduled_poll_sleep(
+    *,
+    started_at: float,
+    attempt_index: int,
+    rounds: int,
+    timeout: int,
+    interval: int,
+    max_checks: Optional[int],
+) -> None:
+    if attempt_index >= rounds - 1:
+        return
+    elapsed = time.monotonic() - started_at
+    remaining = max(0.0, float(timeout) - elapsed)
+    if remaining <= 0:
+        return
+    if max_checks is not None and rounds > 0 and timeout > 0:
+        target_elapsed = float(timeout) * float(attempt_index + 1) / float(rounds)
+        sleep_for = max(0.0, target_elapsed - elapsed)
+    else:
+        sleep_for = float(max(0, interval))
+    if sleep_for > 0:
+        time.sleep(min(remaining, sleep_for))
+
+
 class ChatGPTMailClient:
     """ChatGPT.org.uk 临时邮箱客户端"""
+
+    _NOISY_INFO_PREFIXES = (
+        "[headless]",
+        "[headless][timeout]",
+        "[HTTP]",
+    )
+    _NOISY_INFO_EXACT = {
+        "fetching verification code",
+        "未检测到 Cookie，正在预热...",
+        "正在预热 (获取 Cookie)...",
+    }
+    _NOISY_INFO_CONTAINS = (
+        "headless fetched ",
+        "开始监听邮箱 ",
+        "检查邮件: ",
+        "首次捕获验证码:",
+        "再次获取到相同验证码 ",
+        "等待一段时间后仍只有同一验证码 ",
+    )
+    _HEADLESS_BRIDGE_TIMEOUT_SECONDS = 10
+    _HEADLESS_BRIDGE_MAX_RETRIES = 1
 
     def __init__(
         self,
@@ -32,6 +77,12 @@ class ChatGPTMailClient:
         self.proxies = {"http": proxy, "https": proxy} if proxy else None
         self.log_callback = log_callback
         self.api_key = (api_key or "").strip()
+        self.headless_verbose = str(os.getenv("GPTMAIL_HEADLESS_VERBOSE", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
         self.email: Optional[str] = None
         self._prefer_headless_fetch_messages = False
@@ -61,8 +112,9 @@ class ChatGPTMailClient:
             "Referer": f"{self.home_url}/",
         }
 
-        self._bridge_path = Path(__file__).resolve().parent / "gptmail_headless" / "bridge.mjs"
-        self._headless_client_path = Path(__file__).resolve().parent / "gptmail_headless" / "client.mjs"
+        headless_dir = Path(__file__).resolve().parent / "gptmail_headless"
+        self._bridge_path = headless_dir / "bridge.mjs"
+        self._headless_client_path = headless_dir / "client.mjs"
 
     def _get_cookie_value(self, name: str) -> str:
         exact_match = ""
@@ -178,77 +230,100 @@ class ChatGPTMailClient:
     def _run_headless_bridge(self, action: str, **payload) -> Optional[dict]:
         if not self._is_headless_bridge_available():
             return None
+        proxy = self._headless_proxy().strip()
+        if not proxy:
+            self._log("warning", "headless bridge requested without a proxy; refusing direct connection")
+            return None
         request_payload = {
             "action": action,
             "origin": self.home_url,
             "state": self._headless_state(),
-            "proxy": self._headless_proxy(),
+            "proxy": proxy,
             **payload,
         }
-        try:
-            result = subprocess.run(
-                ["node", str(self._bridge_path)],
-                input=json.dumps(request_payload, ensure_ascii=False),
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                capture_output=True,
-                check=False,
-                timeout=10,
-                env=self._headless_env(),
-            )
-        except subprocess.TimeoutExpired as exc:
-            stderr_output = exc.stderr or ""
-            stdout_output = exc.stdout or ""
-            if isinstance(stderr_output, bytes):
-                stderr_output = stderr_output.decode("utf-8", errors="replace")
-            if isinstance(stdout_output, bytes):
-                stdout_output = stdout_output.decode("utf-8", errors="replace")
-            if stderr_output:
-                for line in stderr_output.splitlines():
+        attempts = self._HEADLESS_BRIDGE_MAX_RETRIES + 1
+        for attempt in range(1, attempts + 1):
+            self._log("info", f"[headless] launch action={action} proxy={proxy} attempt={attempt}/{attempts}")
+            try:
+                result = subprocess.run(
+                    ["node", str(self._bridge_path)],
+                    input=json.dumps(request_payload, ensure_ascii=False),
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    capture_output=True,
+                    check=False,
+                    timeout=self._HEADLESS_BRIDGE_TIMEOUT_SECONDS,
+                    env=self._headless_env(),
+                )
+            except subprocess.TimeoutExpired as exc:
+                stderr_output = exc.stderr or ""
+                stdout_output = exc.stdout or ""
+                if isinstance(stderr_output, bytes):
+                    stderr_output = stderr_output.decode("utf-8", errors="replace")
+                if isinstance(stdout_output, bytes):
+                    stdout_output = stdout_output.decode("utf-8", errors="replace")
+                if stderr_output:
+                    for line in stderr_output.splitlines():
+                        line = line.strip()
+                        if line:
+                            self._log("info", f"[headless][timeout] {line}")
+                if stdout_output:
+                    preview = stdout_output.strip()
+                    if preview:
+                        self._log("info", f"[headless][timeout][stdout] {preview[:1000]}")
+                        try:
+                            response = json.loads(preview)
+                        except Exception:
+                            response = None
+                        if isinstance(response, dict) and response.get("ok"):
+                            self._log("warning", "headless bridge timed out after emitting a successful response; accepting partial stdout")
+                            self._sync_state_from_headless(response.get("state") or {})
+                            return response
+                if attempt < attempts:
+                    self._log("warning", f"headless bridge launch timed out, retrying once: {exc}")
+                    continue
+                self._log("warning", f"headless bridge launch failed: {exc}")
+                return None
+            except Exception as exc:
+                if attempt < attempts:
+                    self._log("warning", f"headless bridge launch failed, retrying once: {exc}")
+                    continue
+                self._log("warning", f"headless bridge launch failed: {exc}")
+                return None
+
+            if result.stderr:
+                for line in result.stderr.splitlines():
                     line = line.strip()
                     if line:
-                        self._log("info", f"[headless][timeout] {line}")
-            if stdout_output:
-                preview = stdout_output.strip()
-                if preview:
-                    self._log("info", f"[headless][timeout][stdout] {preview[:1000]}")
-                    try:
-                        response = json.loads(preview)
-                    except Exception:
-                        response = None
-                    if isinstance(response, dict) and response.get("ok"):
-                        self._log("warning", "headless bridge timed out after emitting a successful response; accepting partial stdout")
-                        self._sync_state_from_headless(response.get("state") or {})
-                        return response
-            self._log("warning", f"headless bridge launch failed: {exc}")
-            return None
-        except Exception as exc:
-            self._log("warning", f"headless bridge launch failed: {exc}")
-            return None
+                        self._log("info", f"[headless] {line}")
 
-        if result.stderr:
-            for line in result.stderr.splitlines():
-                line = line.strip()
-                if line:
-                    self._log("info", f"[headless] {line}")
+            raw = (result.stdout or "").strip()
+            if not raw:
+                if attempt < attempts:
+                    self._log("warning", "headless bridge returned empty output, retrying once")
+                    continue
+                self._log("warning", "headless bridge returned empty output")
+                return None
+            try:
+                response = json.loads(raw)
+            except Exception as exc:
+                if attempt < attempts:
+                    self._log("warning", f"headless bridge invalid json, retrying once: {exc}")
+                    continue
+                self._log("warning", f"headless bridge invalid json: {exc}")
+                return None
 
-        raw = (result.stdout or "").strip()
-        if not raw:
-            self._log("warning", "headless bridge returned empty output")
-            return None
-        try:
-            response = json.loads(raw)
-        except Exception as exc:
-            self._log("warning", f"headless bridge invalid json: {exc}")
-            return None
+            if not response.get("ok"):
+                if attempt < attempts:
+                    self._log("warning", f"headless bridge failed, retrying once: {response.get('error')}")
+                    continue
+                self._log("warning", f"headless bridge failed: {response.get('error')}")
+                return None
 
-        if not response.get("ok"):
-            self._log("warning", f"headless bridge failed: {response.get('error')}")
-            return None
-
-        self._sync_state_from_headless(response.get("state") or {})
-        return response
+            self._sync_state_from_headless(response.get("state") or {})
+            return response
+        return None
 
     @staticmethod
     def _extract_emails_from_payload(payload: Optional[dict]) -> list:
@@ -504,20 +579,27 @@ class ChatGPTMailClient:
         """登录（此服务不需要登录，直接返回 True）"""
         return self.email is not None
 
-    def fetch_messages(self) -> list:
+    def fetch_messages(self, request_timeout: int = 15) -> list:
         """获取邮件列表"""
         if not self.email:
             return []
 
-        if self._prefer_headless_fetch_messages:
+        def _fetch_messages_via_headless(*, clear_preference_on_failure: bool) -> Optional[list]:
             bridge_response = self._run_headless_bridge("fetch_messages")
             if bridge_response:
                 emails = self._extract_emails_from_payload(bridge_response.get("result"))
                 if emails:
                     self._log("info", f"headless fetched {len(emails)} emails")
                 return emails
-            self._log("error", "headless fetch_messages failed while in preferred-headless mode")
-            return []
+            if clear_preference_on_failure:
+                self._prefer_headless_fetch_messages = False
+                self._log("warning", "headless fetch_messages failed, falling back to HTTP polling for this mailbox")
+            return None
+
+        if self._prefer_headless_fetch_messages:
+            headless_emails = _fetch_messages_via_headless(clear_preference_on_failure=True)
+            if headless_emails is not None:
+                return headless_emails
 
         try:
             from urllib.parse import quote
@@ -530,7 +612,7 @@ class ChatGPTMailClient:
                 "cache-control": "no-cache"
             }
             
-            res = self._request("GET", url, headers=headers)
+            res = self._request("GET", url, headers=headers, timeout=max(1, int(request_timeout)))
 
             if res.status_code == 401:
                 try:
@@ -540,21 +622,15 @@ class ChatGPTMailClient:
                 error_message = payload.get("error") if isinstance(payload, dict) else None
                 if isinstance(error_message, str) and "Browser session required" in error_message:
                     self._prefer_headless_fetch_messages = True
-                    bridge_response = self._run_headless_bridge("fetch_messages")
-                    if bridge_response:
-                        emails = self._extract_emails_from_payload(bridge_response.get("result"))
-                        if emails:
-                            self._log("info", f"headless fetched {len(emails)} emails")
-                        return emails
+                    headless_emails = _fetch_messages_via_headless(clear_preference_on_failure=True)
+                    if headless_emails is not None:
+                        return headless_emails
             
             if res.status_code == 429:
                 self._prefer_headless_fetch_messages = True
-                bridge_response = self._run_headless_bridge("fetch_messages")
-                if bridge_response:
-                    emails = self._extract_emails_from_payload(bridge_response.get("result"))
-                    if emails:
-                        self._log("info", f"headless fetched {len(emails)} emails")
-                    return emails
+                headless_emails = _fetch_messages_via_headless(clear_preference_on_failure=True)
+                if headless_emails is not None:
+                    return headless_emails
 
             if res.status_code == 200:
                 try:
@@ -571,33 +647,29 @@ class ChatGPTMailClient:
                     else:
                         self._log("error", f"API 响应格式异常: {res.text[:200]}")
                         self._prefer_headless_fetch_messages = True
-                        bridge_response = self._run_headless_bridge("fetch_messages")
-                        if bridge_response:
-                            emails = self._extract_emails_from_payload(bridge_response.get("result"))
-                            if emails:
-                                self._log("info", f"headless fetched {len(emails)} emails")
-                            return emails
+                        headless_emails = _fetch_messages_via_headless(clear_preference_on_failure=True)
+                        if headless_emails is not None:
+                            return headless_emails
                 except ValueError as e:
                     self._log("error", f"JSON 解析失败，响应内容: {res.text[:500]}")
         except Exception as e:
             self._log("error", f"获取邮件列表失败: {e}")
             self._prefer_headless_fetch_messages = True
-            bridge_response = self._run_headless_bridge("fetch_messages")
-            if bridge_response:
-                emails = self._extract_emails_from_payload(bridge_response.get("result"))
-                if emails:
-                    self._log("info", f"headless fetched {len(emails)} emails")
-                return emails
+            headless_emails = _fetch_messages_via_headless(clear_preference_on_failure=True)
+            if headless_emails is not None:
+                return headless_emails
             
-        bridge_response = self._run_headless_bridge("fetch_messages")
-        if bridge_response:
-            emails = self._extract_emails_from_payload(bridge_response.get("result"))
-            if emails:
-                self._log("info", f"headless fetched {len(emails)} emails")
-            return emails
+        headless_emails = _fetch_messages_via_headless(clear_preference_on_failure=False)
+        if headless_emails is not None:
+            return headless_emails
         return []
 
-    def fetch_verification_code(self, since_time: Optional[datetime] = None) -> Optional[str]:
+    def fetch_verification_code(
+        self,
+        since_time: Optional[datetime] = None,
+        *,
+        request_timeout: int = 15,
+    ) -> Optional[str]:
         """获取验证码"""
         if not self.email:
             return None
@@ -609,29 +681,53 @@ class ChatGPTMailClient:
             current_timestamp = time.time()
             time_threshold = current_timestamp - 10
             
-            messages = self.fetch_messages()
+            messages = self.fetch_messages(request_timeout=request_timeout)
             
             if not messages:
                 return None
 
             # 遍历邮件
             for msg in messages:
-                # 使用 timestamp 字段进行时间过滤（只检查最近10秒内的邮件）
-                msg_timestamp = msg.get("timestamp")
-                # if msg_timestamp:
-                #     if msg_timestamp < time_threshold:
-                #         self._log("info", f"跳过旧邮件: timestamp={msg_timestamp} < {time_threshold}")
-                #         continue
-                
-                # 额外的 since_time 过滤（如果提供）
-                if since_time and msg.get("timestamp"):
+                msg_time = None
+
+                for time_key in ("timestamp", "created_at", "date", "received_at"):
+                    raw_time = msg.get(time_key)
+                    if raw_time in (None, ""):
+                        continue
+
                     try:
-                        # 解析时间戳
-                        msg_time = datetime.fromisoformat(msg["timestamp"].replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
-                        if msg_time < since_time:
+                        if isinstance(raw_time, (int, float)):
+                            ts = float(raw_time)
+                            if ts > 10_000_000_000:
+                                ts = ts / 1000.0
+                            msg_time = datetime.fromtimestamp(ts).astimezone().replace(tzinfo=None)
+                            break
+
+                        raw_text = str(raw_time).strip()
+                        if not raw_text:
                             continue
+
+                        if re.fullmatch(r"\d+(?:\.\d+)?", raw_text):
+                            ts = float(raw_text)
+                            if ts > 10_000_000_000:
+                                ts = ts / 1000.0
+                            msg_time = datetime.fromtimestamp(ts).astimezone().replace(tzinfo=None)
+                            break
+
+                        msg_time = datetime.fromisoformat(
+                            raw_text.replace("Z", "+00:00")
+                        ).astimezone().replace(tzinfo=None)
+                        break
                     except Exception:
-                        pass
+                        continue
+
+                if since_time and msg_time and msg_time < since_time:
+                    self._log(
+                        "info",
+                        f"跳过旧邮件: subject='{str(msg.get('subject') or '')[:50]}', "
+                        f"msg_time={msg_time.isoformat()} < since_time={since_time.isoformat()}",
+                    )
+                    continue
 
                 # 提取邮件内容
                 subject = msg.get("subject") or ""
@@ -639,7 +735,11 @@ class ChatGPTMailClient:
                 text_content = msg.get("content") or ""
                 
                 # 记录邮件信息用于调试
-                self._log("info", f"检查邮件: subject='{subject[:50] if subject else 'N/A'}', timestamp={msg_timestamp}")
+                self._log(
+                    "info",
+                    f"检查邮件: subject='{subject[:50] if subject else 'N/A'}', "
+                    f"msg_time={msg_time.isoformat() if msg_time else 'unknown'}",
+                )
                 
                 content = f"{subject} {html_content} {text_content}"
                 
@@ -660,12 +760,14 @@ class ChatGPTMailClient:
         timeout: int = 120,
         interval: int = 3,
         since_time: Optional[datetime] = None,
+        *,
+        max_checks: Optional[int] = None,
+        request_timeout: int = 15,
     ) -> Optional[str]:
-        """轮询获取验证码"""
+        """轮询获取验证码；如果先拿到旧码则继续等待新码"""
         if not self.email:
             return None
 
-        # 确保已经预热（获取 Cookie）
         if not self.session.cookies:
             self._log("info", "未检测到 Cookie，正在预热...")
             if not self.warm_up():
@@ -675,26 +777,98 @@ class ChatGPTMailClient:
         self._log("info", f"开始监听邮箱 {self.email}，等待验证码...")
 
         started_at = time.monotonic()
-        attempt = 0
+        last_seen_code = None
+        same_code_hits = 0
+        checks_done = 0
+        effective_max_checks = max(1, int(max_checks)) if max_checks is not None else None
+        rounds = effective_max_checks or max(1, int(timeout / max(interval, 1)))
+
         while True:
-            attempt += 1
-            code = self.fetch_verification_code(since_time=since_time)
+            if effective_max_checks is not None and checks_done >= effective_max_checks:
+                if last_seen_code:
+                    self._log("warning", f"验证码轮询达到最大检测次数，返回最后一次获取到的验证码: {last_seen_code}")
+                    return last_seen_code
+                break
+            checks_done += 1
+            code = self.fetch_verification_code(
+                since_time=since_time,
+                request_timeout=request_timeout,
+            )
             if code:
-                return code
+                if last_seen_code is None:
+                    last_seen_code = code
+                    same_code_hits = 1
+                    self._log("info", f"首次捕获验证码: {code}，继续短暂等待确认是否有更新验证码")
+                elif code != last_seen_code:
+                    self._log("info", f"检测到新验证码，替换旧验证码 {last_seen_code} -> {code}")
+                    return code
+                else:
+                    same_code_hits += 1
+                    if same_code_hits <= 2:
+                        self._log("info", f"再次获取到相同验证码 {code}，继续等待更新邮件")
+                    elif time.monotonic() - started_at >= min(timeout, max(interval * 2, 6)):
+                        self._log("info", f"等待一段时间后仍只有同一验证码 {code}，返回该验证码")
+                        return code
 
             elapsed = time.monotonic() - started_at
             if elapsed >= timeout:
+                if last_seen_code:
+                    self._log("warning", f"验证码轮询超时，返回最后一次获取到的验证码: {last_seen_code}")
+                    return last_seen_code
                 break
 
-            remaining = timeout - elapsed
-            time.sleep(min(interval, max(0, remaining)))
+            _scheduled_poll_sleep(
+                started_at=started_at,
+                attempt_index=checks_done - 1,
+                rounds=rounds,
+                timeout=timeout,
+                interval=interval,
+                max_checks=effective_max_checks,
+            )
 
         self._log("error", "verification code timeout")
         return None
 
     def _log(self, level: str, message: str) -> None:
+        if self._should_suppress_log(level, message):
+            return
         if self.log_callback:
             try:
                 self.log_callback(level, message)
             except Exception:
                 pass
+
+    def _should_suppress_log(self, level: str, message: str) -> bool:
+        if self.headless_verbose:
+            return False
+        normalized_level = str(level or "").strip().lower()
+        normalized_message = str(message or "").strip()
+        if not normalized_message:
+            return False
+        if normalized_level in {"warning", "error"}:
+            return normalized_message.startswith("headless bridge invalid json:")
+        if normalized_level != "info":
+            return False
+        if normalized_message in self._NOISY_INFO_EXACT:
+            return True
+        if normalized_message.startswith(self._NOISY_INFO_PREFIXES):
+            return True
+        return any(fragment in normalized_message for fragment in self._NOISY_INFO_CONTAINS)
+
+    def register_openai_account(
+        self,
+        use_tempmail_fallback: bool = True,
+        openai_proxy: Optional[str] = None,
+        use_fast_login: bool = False,
+    ) -> str:
+        from .openai_registrar import OpenAIRegistrar
+
+        registrar = OpenAIRegistrar(
+            proxy=openai_proxy,
+            mailbox_proxy="",
+            mail_client=self,
+            use_tempmail_fallback=use_tempmail_fallback,
+            use_fast_login=use_fast_login,
+            log_callback=self.log_callback,
+        )
+        return registrar.register()

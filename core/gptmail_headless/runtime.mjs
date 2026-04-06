@@ -1,10 +1,14 @@
 import vm from 'node:vm'
 
 let UndiciProxyAgent = null
+let UndiciFetch = globalThis.fetch
+let UndiciHeaders = globalThis.Headers
 try {
-  ({ ProxyAgent: UndiciProxyAgent } = await import('undici'))
+  ({ ProxyAgent: UndiciProxyAgent, fetch: UndiciFetch, Headers: UndiciHeaders } = await import('undici'))
 } catch {
   UndiciProxyAgent = null
+  UndiciFetch = globalThis.fetch
+  UndiciHeaders = globalThis.Headers
 }
 
 class EventTargetLike {
@@ -143,13 +147,14 @@ export class LightweightPageRuntime {
     this.baseUrl = baseUrl; this.logger = logger; this.proxyUrl = proxyUrl || envProxyUrl || ''; this.proxyAgent = this.proxyUrl && UndiciProxyAgent ? new UndiciProxyAgent(this.proxyUrl) : null; this.cookieJar = new CookieJar(cookieSeed)
     this.localStorage = new StorageLike(localStorageSeed); this.sessionStorage = new StorageLike(sessionStorageSeed)
     this.networkLog = []; this.intervalHandles = new Set(); this.timeoutHandles = new Set(); this.document = null; this.window = null; this.context = null; this.scripts = []
-    if (this.proxyUrl && !UndiciProxyAgent) this.logger.warn?.('[runtime] proxy requested but undici is unavailable; falling back to direct fetch')
+    if (!this.proxyUrl) throw new Error('[runtime] proxy is required for headless runtime; direct fetch is disabled')
+    if (this.proxyUrl && !UndiciProxyAgent) throw new Error('[runtime] proxy requested but undici ProxyAgent is unavailable')
   }
   async load(url, options = {}) {
     const target = new URL(url, this.baseUrl).toString(); this.logger.info?.(`[runtime] load ${target}`)
     if (this.proxyUrl) this.logger.info?.(`[runtime] proxy ${this.proxyUrl}`)
     const startedAt = Date.now()
-    const response = await fetch(target, this._withProxy({ headers: this._buildHeaders(), redirect: 'follow', ...options })); this._captureCookies(response)
+    const response = await UndiciFetch(target, this._withProxy({ headers: this._buildHeaders(), redirect: 'follow', ...options })); this._captureCookies(response)
     this.logger.info?.(`[runtime] load response ${response.status} ${response.url} (${Date.now() - startedAt}ms)`)
     const html = await response.text(); this.document = new DocumentLike(target); this.window = this._createWindow(target); this.document.defaultView = this.window; this.context = vm.createContext(this.window)
     this.logger.info?.(`[runtime] html length ${html.length}`)
@@ -164,7 +169,7 @@ export class LightweightPageRuntime {
       window: null, self: null, globalThis: null, document: this.document,
       navigator: { userAgent: 'gptmail-headless/0.1', language: 'en-US', clipboard: { writeText: async () => {} } },
       get documentCookie() { return runtime.cookieJar.header() }, set documentCookie(value) { runtime.cookieJar.setFromDocumentCookie(value) },
-      location, history, localStorage: this.localStorage, sessionStorage: this.sessionStorage, console: this.logger, Headers, URL, URLSearchParams,
+      location, history, localStorage: this.localStorage, sessionStorage: this.sessionStorage, console: this.logger, Headers: UndiciHeaders, URL, URLSearchParams, AbortController,
       setTimeout(fn, delay = 0, ...args) { const handle = setTimeout(() => fn(...args), delay); runtime.timeoutHandles.add(handle); return handle },
       clearTimeout(handle) { clearTimeout(handle); runtime.timeoutHandles.delete(handle) },
       setInterval(fn, delay = 0, ...args) { const handle = setInterval(() => fn(...args), delay); runtime.intervalHandles.add(handle); return handle },
@@ -179,13 +184,16 @@ export class LightweightPageRuntime {
   _buildHeaders(extra = {}) { const headers = { ...extra }; const cookie = this.cookieJar.header(); if (cookie) headers.cookie = cookie; return headers }
   _captureCookies(response) { const setCookie = response.headers.get('set-cookie'); if (setCookie) this.cookieJar.setFromHeader(setCookie) }
   async _fetch(input, init = {}) {
-    const url = new URL(typeof input === 'string' ? input : input.url, this.window.location.href).toString(); const headers = new Headers(init.headers || {}); const cookie = this.cookieJar.header()
+    const url = new URL(typeof input === 'string' ? input : input.url, this.window.location.href).toString(); const headers = new UndiciHeaders(init.headers || {}); const cookie = this.cookieJar.header()
     if (cookie && (init.credentials === 'include' || init.credentials === 'same-origin' || !init.credentials)) headers.set('cookie', cookie)
     const requestInfo = { url, method: init.method || 'GET', headers: Object.fromEntries(headers.entries()) }; this.logger.info?.(`[fetch] start ${requestInfo.method} ${url}`)
     const startedAt = Date.now()
-    const response = await fetch(url, this._withProxy({ ...init, headers })); this._captureCookies(response); this.networkLog.push({ request: requestInfo, response: { status: response.status, url: response.url } }); this.logger.info?.(`[fetch] done ${requestInfo.method} ${url} -> ${response.status} (${Date.now() - startedAt}ms)`); return response
+    const response = await UndiciFetch(url, this._withProxy({ ...init, headers })); this._captureCookies(response); this.networkLog.push({ request: requestInfo, response: { status: response.status, url: response.url } }); this.logger.info?.(`[fetch] done ${requestInfo.method} ${url} -> ${response.status} (${Date.now() - startedAt}ms)`); return response
   }
-  _withProxy(options = {}) { return this.proxyAgent ? { ...options, dispatcher: this.proxyAgent } : options }
+  _withProxy(options = {}) {
+    if (!this.proxyAgent) throw new Error('[runtime] proxyAgent is unavailable; refusing direct request')
+    return { ...options, dispatcher: this.proxyAgent }
+  }
   _parseHtml(html) {
     this.scripts = []
     const htmlTagMatch = html.match(/<html([^>]*)>/i)

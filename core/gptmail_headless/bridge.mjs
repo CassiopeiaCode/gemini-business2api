@@ -13,15 +13,33 @@ function createLogger() {
     }
   }
 
-  const write = (...args) => {
-    process.stderr.write(`${args.map(format).join(' ')}\n`)
+  let lastProgressLength = 0
+
+  const write = (suffix, ...args) => {
+    const message = args.map(format).join(' ')
+    const padded =
+      suffix === '\r' && lastProgressLength > message.length
+        ? message + ' '.repeat(lastProgressLength - message.length)
+        : message
+    process.stderr.write(`${padded}${suffix}`)
+    if (suffix === '\r') {
+      lastProgressLength = padded.length
+    } else {
+      lastProgressLength = 0
+    }
   }
 
   return {
-    info(...args) { write(...args) },
-    error(...args) { write(...args) },
-    warn(...args) { write(...args) },
-    log(...args) { write(...args) },
+    info(...args) { write('\r', ...args) },
+    error(...args) { write('\n', ...args) },
+    warn(...args) { write('\n', ...args) },
+    log(...args) { write('\r', ...args) },
+    flush() {
+      if (lastProgressLength > 0) {
+        process.stderr.write('\n')
+        lastProgressLength = 0
+      }
+    },
   }
 }
 
@@ -30,6 +48,16 @@ async function readStdinJson() {
   for await (const chunk of process.stdin) chunks.push(chunk)
   const raw = Buffer.concat(chunks).toString('utf8').trim()
   return raw ? JSON.parse(raw) : {}
+}
+
+async function writeStdoutJson(payload) {
+  const body = typeof payload === 'string' ? payload : JSON.stringify(payload)
+  await new Promise((resolve, reject) => {
+    process.stdout.write(body, (error) => {
+      if (error) reject(error)
+      else resolve()
+    })
+  })
 }
 
 function seedClientState(client, state = {}) {
@@ -117,7 +145,11 @@ async function main() {
   const logger = createLogger()
   const origin = (payload.origin || 'https://mail.chatgpt.org.uk').replace(/\/$/, '')
   const state = payload.state || {}
-  const proxyUrl = state.proxy || payload.proxy || ''
+  const proxyUrl = payload.proxy || state.proxy || ''
+
+  if (!proxyUrl) {
+    throw new Error('Headless bridge requires an explicit proxyUrl; direct connections are disabled')
+  }
 
   logger.info('[bridge] start', { action: payload.action || '', origin, path: payload.path || '/zh/', hasState: Boolean(state && Object.keys(state).length), proxyUrl })
 
@@ -177,10 +209,12 @@ async function main() {
       result,
       state: buildState(client, state),
     }
-    logger.info('[bridge] success', { action: payload.action || '', email: output.state?.email || '', networkCount: client.snapshot()?.networkCount ?? null })
-    process.stdout.write(JSON.stringify(output))
+    logger.flush()
+    logger.warn('[bridge] success', { action: payload.action || '', email: output.state?.email || '', networkCount: client.snapshot()?.networkCount ?? null })
+    await writeStdoutJson(output)
   } finally {
-    logger.info('[bridge] destroy')
+    logger.flush()
+    logger.warn('[bridge] destroy')
     client.destroy()
   }
 
@@ -189,6 +223,7 @@ async function main() {
 
 main().catch((error) => {
   process.stderr.write(`[bridge] fatal ${error?.stack || error?.message || String(error)}\n`)
-  process.stdout.write(JSON.stringify({ ok: false, error: error.message || String(error) }))
-  process.exit(1)
+  return writeStdoutJson({ ok: false, error: error.message || String(error) }).finally(() => {
+    process.exitCode = 1
+  })
 })
